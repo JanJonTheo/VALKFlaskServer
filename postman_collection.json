@@ -1,0 +1,1139 @@
+{
+  "info": {
+    "name": "EIC FlaskServer API",
+    "description": "BGS Data API for Elite Dangerous",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "apikey",
+    "apikey": [
+      {
+        "key": "key",
+        "value": "apikey",
+        "type": "string"
+      },
+      {
+        "key": "value",
+        "value": "yourapikeyhere",
+        "type": "string"
+      },
+      {
+        "key": "in",
+        "value": "header",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:5000",
+      "type": "string"
+    },
+    {
+      "key": "apiversion",
+      "value": "1.6.0",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Events",
+      "item": [
+        {
+          "name": "Post Events",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "[\n  {\n    \"timestamp\": \"2024-01-15T10:30:00Z\",\n    \"event\": \"MarketBuy\",\n    \"cmdr\": \"TestCommander\",\n    \"system\": \"Sol\",\n    \"station\": \"Abraham Lincoln\",\n    \"tickid\": 12345,\n    \"Stock\": \"High\",\n    \"StockBracket\": 3,\n    \"TotalCost\": 150000,\n    \"Count\": 100\n  }\n]"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/events",
+              "host": ["{{baseUrl}}"],
+              "path": ["events"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Activities",
+      "item": [
+        {
+          "name": "Put Activities",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tickid\": 12345,\n  \"ticktime\": \"2024-01-15T12:00:00Z\",\n  \"timestamp\": \"2024-01-15T12:05:00Z\",\n  \"cmdr\": \"TestCommander\",\n  \"systems\": [\n    {\n      \"name\": \"Sol\",\n      \"address\": 10477373803,\n      \"factions\": [\n        {\n          \"name\": \"Federal Navy\",\n          \"state\": \"None\",\n          \"bvs\": 5,\n          \"cbs\": 3,\n          \"infprimary\": 2\n        }\n      ]\n    }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/activities",
+              "host": ["{{baseUrl}}"],
+              "path": ["activities"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Summary APIs",
+      "item": [
+        {
+          "name": "Market Events Summary",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/summary/market-events?period=cm",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "summary", "market-events"],
+              "query": [
+                {
+                  "key": "period",
+                  "value": "cm",
+                  "description": "cw|lw|cm|lm|2m|y|cd|ld|all"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Missions Completed Summary",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/summary/missions-completed?period=cm",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "summary", "missions-completed"],
+              "query": [
+                {
+                  "key": "period",
+                  "value": "cm"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Missions Failed Summary",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/summary/missions-failed?period=cm",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "summary", "missions-failed"],
+              "query": [
+                {
+                  "key": "period",
+                  "value": "cm"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Bounty Vouchers Summary",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/summary/bounty-vouchers?period=cm",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "summary", "bounty-vouchers"],
+              "query": [
+                {
+                  "key": "period",
+                  "value": "cm"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Combat Bonds Summary",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/summary/combat-bonds?period=cm",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "summary", "combat-bonds"],
+              "query": [
+                {
+                  "key": "period",
+                  "value": "cm"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Influence by Faction Summary",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/summary/influence-by-faction?period=cm",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "summary", "influence-by-faction"],
+              "query": [
+                {
+                  "key": "period",
+                  "value": "cm"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Influence EIC Summary",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/summary/influence-eic?period=cm",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "summary", "influence-eic"],
+              "query": [
+                {
+                  "key": "period",
+                  "value": "cm"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Exploration Sales Summary",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/summary/exploration-sales?period=cm",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "summary", "exploration-sales"],
+              "query": [
+                {
+                  "key": "period",
+                  "value": "cm"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Bounty Fines Summary",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/summary/bounty-fines?period=cm",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "summary", "bounty-fines"],
+              "query": [
+                {
+                  "key": "period",
+                  "value": "cm"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "All Bounty Vouchers (with Filter)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/bounty-vouchers?cmdr=&system=&tickid=&type=bounty&faction=&squadron_rank=&period=cm",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "bounty-vouchers"],
+              "query": [
+                {
+                  "key": "cmdr",
+                  "value": "",
+                  "description": "Filter nach Cmdr (optional)"
+                },
+                {
+                  "key": "system",
+                  "value": "",
+                  "description": "Filter nach System (optional)"
+                },
+                {
+                  "key": "tickid",
+                  "value": "",
+                  "description": "Filter nach Tick-ID (optional)"
+                },
+                {
+                  "key": "type",
+                  "value": "bounty",
+                  "description": "Typ des Vouchers (bounty, CombatBond, etc.)"
+                },
+                {
+                  "key": "faction",
+                  "value": "",
+                  "description": "Filter nach Fraktion (optional)"
+                },
+                {
+                  "key": "squadron_rank",
+                  "value": "",
+                  "description": "Filter nach Squadron Rank (optional)"
+                },
+                {
+                  "key": "period",
+                  "value": "cm",
+                  "description": "Zeitraum: cw|lw|cm|lm|2m|y|cd|ld|all"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "SyntheticCZ Summary",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/syntheticcz-summary?period=cm",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "syntheticcz-summary"],
+              "query": [
+                {
+                  "key": "period",
+                  "value": "cm",
+                  "description": "cw|lw|cm|lm|2m|y|cd|ld|all"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "SyntheticGroundCZ Summary",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/syntheticgroundcz-summary?period=cm",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "syntheticgroundcz-summary"],
+              "query": [
+                {
+                  "key": "period",
+                  "value": "cm",
+                  "description": "cw|lw|cm|lm|2m|y|cd|ld|all"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Top 5 APIs",
+      "item": [
+        {
+          "name": "Top 5 Market Events",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/summary/top5/market-events?period=cm",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "summary", "top5", "market-events"],
+              "query": [
+                {
+                  "key": "period",
+                  "value": "cm"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Top 5 Missions Completed",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/summary/top5/missions-completed?period=cm",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "summary", "top5", "missions-completed"],
+              "query": [
+                {
+                  "key": "period",
+                  "value": "cm"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Top 5 Bounty Vouchers",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/summary/top5/bounty-vouchers?period=cm",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "summary", "top5", "bounty-vouchers"],
+              "query": [
+                {
+                  "key": "period",
+                  "value": "cm"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Top 5 Combat Bonds",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/summary/top5/combat-bonds?period=cm",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "summary", "top5", "combat-bonds"],
+              "query": [
+                {
+                  "key": "period",
+                  "value": "cm"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Top 5 Influence EIC",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/summary/top5/influence-eic?period=cm",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "summary", "top5", "influence-eic"],
+              "query": [
+                {
+                  "key": "period",
+                  "value": "cm"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Top 5 Exploration Sales",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/summary/top5/exploration-sales?period=cm",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "summary", "top5", "exploration-sales"],
+              "query": [
+                {
+                  "key": "period",
+                  "value": "cm"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Discord Integration",
+      "item": [
+        {
+          "name": "Send All Top 5 to Discord",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/summary/discord/top5all",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "summary", "discord", "top5all"]
+            }
+          }
+        },
+        {
+          "name": "Trigger Daily Tick Summary",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/summary/discord/tick",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "summary", "discord", "tick"]
+            }
+          }
+        },
+        {
+          "name": "Send SyntheticCZ Summary to Discord",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/summary/discord/syntheticcz?period=cm",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "summary", "discord", "syntheticcz"],
+              "query": [
+                {
+                  "key": "period",
+                  "value": "cm",
+                  "description": "cw|lw|cm|lm|2m|y|cd|ld|all"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Send SyntheticGroundCZ Summary to Discord",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/summary/discord/syntheticgroundcz?period=cm",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "summary", "discord", "syntheticgroundcz"],
+              "query": [
+                {
+                  "key": "period",
+                  "value": "cm",
+                  "description": "cw|lw|cm|lm|2m|y|cd|ld|all"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Database Tables",
+      "item": [
+        {
+          "name": "Query Table - Events",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/table/event",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "table", "event"]
+            }
+          }
+        },
+        {
+          "name": "Query Table - Market Buy Events",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/table/market_buy_event",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "table", "market_buy_event"]
+            }
+          }
+        },
+        {
+          "name": "Query Table - Activities",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/table/activity",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "table", "activity"]
+            }
+          }
+        },
+        {
+          "name": "Query Table - CMDR",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/table/cmdr",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "table", "cmdr"]
+            }
+          }
+        },
+        {
+          "name": "Query Table - Objectives",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/table/objective",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "table", "objective"]
+            }
+          }
+        },
+        {
+          "name": "Query Table - Objective Targets",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/table/objective_target",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "table", "objective_target"]
+            }
+          }
+        },
+        {
+          "name": "Query Table - Objective Target Settlements",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/table/objective_target_settlement",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "table", "objective_target_settlement"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Leaderboard & Recruits",
+      "item": [
+        {
+          "name": "Leaderboard Summary",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/summary/leaderboard?period=cm",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "summary", "leaderboard"],
+              "query": [
+                {
+                  "key": "period",
+                  "value": "cm",
+                  "description": "cw|lw|cm|lm|2m|y|cd|ld|all"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Recruits Summary",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/summary/recruits",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "summary", "recruits"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Objectives",
+      "item": [
+        {
+          "name": "Create Objective",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Test Objective\",\n  \"priority\": 1,\n  \"type\": \"Trade\",\n  \"system\": \"Sol\",\n  \"faction\": \"Federal Navy\",\n  \"description\": \"Test objective description\",\n  \"startdate\": \"2024-01-15T00:00:00\",\n  \"enddate\": \"2024-01-22T23:59:59\",\n  \"targets\": [\n    {\n      \"type\": \"Trade\",\n      \"station\": \"Abraham Lincoln\",\n      \"system\": \"Sol\",\n      \"faction\": \"Federal Navy\",\n      \"progress\": 0,\n      \"targetindividual\": 1000,\n      \"targetoverall\": 10000,\n      \"settlements\": [\n        {\n          \"name\": \"Test Settlement\",\n          \"targetindividual\": 500,\n          \"targetoverall\": 5000,\n          \"progress\": 0\n        }\n      ]\n    }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/objectives",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "objectives"]
+            }
+          }
+        },
+        {
+          "name": "Get Objectives",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/objectives",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "objectives"]
+            }
+          }
+        },
+        {
+          "name": "Get Objectives by System",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/objectives?system=Sol",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "objectives"],
+              "query": [
+                {
+                  "key": "system",
+                  "value": "Sol"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Objectives by Faction",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/objectives?faction=Federal Navy",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "objectives"],
+              "query": [
+                {
+                  "key": "faction",
+                  "value": "Federal Navy"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Active Objectives",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/objectives?active=true",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "objectives"],
+              "query": [
+                {
+                  "key": "active",
+                  "value": "true",
+                  "description": "Filter for only active objectives"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Delete Objective",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/objectives/1",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "objectives", "1"]
+            }
+          }
+        },
+        {
+          "name": "Get Objectives (Alias)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/objectives",
+              "host": ["{{baseUrl}}"],
+              "path": ["objectives"]
+            }
+          }
+        },
+        {
+          "name": "Create Objective (Alias)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Test Objective via Alias\",\n  \"priority\": 1,\n  \"type\": \"Trade\",\n  \"system\": \"Sol\",\n  \"faction\": \"Federal Navy\",\n  \"description\": \"Test objective description via alias\",\n  \"startdate\": \"2024-01-15T00:00:00\",\n  \"enddate\": \"2024-01-22T23:59:59\",\n  \"targets\": [\n    {\n      \"type\": \"Trade\",\n      \"station\": \"Abraham Lincoln\",\n      \"system\": \"Sol\",\n      \"faction\": \"Federal Navy\",\n      \"progress\": 0,\n      \"targetindividual\": 1000,\n      \"targetoverall\": 10000,\n      \"settlements\": [\n        {\n          \"name\": \"Test Settlement\",\n          \"targetindividual\": 500,\n          \"targetoverall\": 5000,\n          \"progress\": 0\n        }\n      ]\n    }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/objectives",
+              "host": ["{{baseUrl}}"],
+              "path": ["objectives"]
+            }
+          }
+        },
+        {
+          "name": "Delete Objective (Alias)",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/objectives/1",
+              "host": ["{{baseUrl}}"],
+              "path": ["objectives", "1"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Authentication",
+      "item": [
+        {
+          "name": "Login",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"testuser\",\n  \"password\": \"testpassword\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "login"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Debug & Sync",
+      "item": [
+        {
+          "name": "Debug Tick Change",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/debug/tick-change",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "debug", "tick-change"]
+            }
+          }
+        },
+        {
+          "name": "Sync Commanders",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/sync/cmdrs",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "sync", "cmdrs"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Discovery & Health",
+      "item": [
+        {
+          "name": "Server Discovery",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/discovery",
+              "host": ["{{baseUrl}}"],
+              "path": ["discovery"]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -3,16 +3,19 @@ from datetime import datetime
 import requests
 import time
 import logging
+import os
 from apscheduler.schedulers.background import BackgroundScheduler
+from dotenv import load_dotenv
 
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
 # API key for Inara API access (personal key, not shared)
-INARA_API_KEY = "7cwtmrnsvx0cksskg440scg00gsog0kkos0g0g4"
+INARA_API_KEY = os.getenv("INARA_API_KEY")
 
 # Discord webhook URL for sending to Bullis' Discord channel
-DISCORD_DEBUG_URL = "https://discord.com/api/webhooks/1387032877161779274/jW1H6hEe9P66lkxx96h8uLFCKkJ8lmmm4WWLbMJ5UrUVonAtlVuVWQN5v0vq571XydAA"
+DISCORD_DEBUG_URL = os.getenv("DISCORD_BULLIS_WEBHOOK_PROD")
 
 
 def fetch_inara_profile(cmdr_name):

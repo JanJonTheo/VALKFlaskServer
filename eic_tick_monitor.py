@@ -1,25 +1,40 @@
 import logging
 import requests
+import os
+from apscheduler.schedulers.background import BackgroundScheduler
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Discord webhook URL for sending to Bullis' Discord channel
-#DISCORD_CONFLICT_WEBHOOK = "https://discord.com/api/webhooks/1387032877161779274/jW1H6hEe9P66lkxx96h8uLFCKkJ8lmmm4WWLbMJ5UrUVonAtlVuVWQN5v0vq571XydAA"
+#DISCORD_CONFLICT_WEBHOOK = os.getenv("DISCORD_BULLIS_WEBHOOK_PROD")
 
 # Discord webhook URL for sending to EICs' BGS Discord channel
-DISCORD_CONFLICT_WEBHOOK = "https://discord.com/api/webhooks/1387701927852249150/W7YxWFgk0JeAnBmKWSABzzc7SRJj8UQa3aJUhed-Vm5KMg9V8uz7JXf-i88jSLzDW144"
+DISCORD_CONFLICT_WEBHOOK = os.getenv("DISCORD_CONFLICT_WEBHOOK_PROD")
 
+# API key for authentication
+API_KEY = os.getenv("API_KEY_PROD")
+API_VERSION = os.getenv("API_VERSION_PROD")
+
+# Flask server URL
+FLASK_SERVER_URL = os.getenv("FLASK_SERVER_URL_PROD")
+
+# Options for the scheduler
+BGS_TICK_ANNOUNCEMENT = os.getenv("BGS_TICK_ANNOUNCEMENT", "true").lower() == "true"
 
 def on_tick_change():
     """
     Triggered when a new tick is detected. Sends an announcement and a conflict message to Discord
     """
     try:
-        send_tick_announcement()
+        if BGS_TICK_ANNOUNCEMENT:
+            send_tick_announcement()
+
         logging.info("[TickTriggerEIC] Tick change detected, sending conflict report to Discord")
         response = requests.post(
-            "http://167.235.65.113:5000/api/discord/eic-in-conflict-current-tick",
-            headers={"apikey": "churchoficarus"}
+            FLASK_SERVER_URL + "/api/discord/eic-in-conflict-current-tick",
+            headers={"apikey": API_KEY}
         )
-        # Change to 167.235.65.113 in production, localhost for testing
         if response.status_code == 200:
             logging.info("[TickTriggerEIC] Conflict report sent successfully")
         else:

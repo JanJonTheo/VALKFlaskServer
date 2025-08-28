@@ -88,8 +88,8 @@ The following API endpoints are available. Their specification is based on the d
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/yourusername/EICFlaskServer.git
-   cd EICFlaskServer
+   git clone https://github.com/yourusername/VALKFlaskServer.git
+   cd VALKFlaskServer
    ```
 
 2. **Install dependencies**

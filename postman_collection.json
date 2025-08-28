@@ -1,6 +1,6 @@
 {
   "info": {
-    "name": "EIC FlaskServer API",
+    "name": "VALK FlaskServer API",
     "description": "BGS Data API for Elite Dangerous",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },

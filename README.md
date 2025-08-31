@@ -1,6 +1,6 @@
-![VALT Logo](static/VALT_logo.jpg)
+# Fork of the VALK Flask Server for CIU
 
-# Flask API for BGS-Tally Data
+![CIU Logo](static/CIU.png)
 
 ## Project Description
 This project provides a RESTful API for receiving, storing, and processing Background Simulation (BGS) and Thargoid War activity data for the game Elite Dangerous. It is designed to integrate with BGS-Tally and other tools to support faction management and war tracking.

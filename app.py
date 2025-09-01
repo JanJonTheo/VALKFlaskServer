@@ -1118,6 +1118,24 @@ def discovery():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/", methods=["GET"])
+def root():
+    """Root endpoint providing basic server information"""
+    try:
+        return jsonify({
+            "message": "VALK Flask Server is running",
+            "version": os.getenv("API_VERSION_PROD", "1.0.0"),
+            "name": os.getenv("SERVER_NAME_PROD", "VALK Flask Server"),
+            "endpoints": {
+                "discovery": "/discovery",
+                "api": "/api/"
+            }
+        }), 200
+    except Exception as e:
+        logger.error(f"Root endpoint error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/objectives", methods=["POST"])
 @app.route("/objectives", methods=["POST"])
 @require_api_key

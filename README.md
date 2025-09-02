@@ -1,6 +1,6 @@
-# Fork of the VALK Flask Server for CIU
+![VALT Logo](static/VALT_logo.jpg)
 
-![CIU Logo](static/CIU.png)
+# Flask API for BGS-Tally Data
 
 ## Project Description
 

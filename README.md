@@ -209,6 +209,7 @@ docker-compose up --build
 ## Credits
 
 This project was developed by Cmdr JanJonTheo.
+Docker release by daniele-liprandi
 
 ## Disclaimer
 

@@ -17,7 +17,7 @@ fi
 echo ""
 echo "2. Testing Flask discovery endpoint..."
 DISCOVERY_RESPONSE=$(curl -s http://localhost:5000/discovery)
-if echo "$DISCOVERY_RESPONSE" | grep -q "VALT FlaskServer BGS Data API"; then
+if echo "$DISCOVERY_RESPONSE" | grep -q "VALK FlaskServer BGS Data API"; then
     echo "   ✅ Flask discovery endpoint working"
 else
     echo "   ❌ Flask discovery endpoint failed"

@@ -12,9 +12,9 @@ def start_eic_conflict_scheduler(app, db):
         try:
             logging.info("[Scheduler] Triggering /api/discord/eic-in-conflict-current-tick")
             response = requests.post(
-                "http://167.235.65.113:5000/api/discord/eic-in-conflict-current-tick",
+                "http://1.2.3.4:5000/api/discord/eic-in-conflict-current-tick",
                 headers={
-                    "apikey": "churchoficarus",
+                    "apikey": "testapikey",
                     "apiversion": "1.6.0"  # Header hinzugefügt
                 }
             )

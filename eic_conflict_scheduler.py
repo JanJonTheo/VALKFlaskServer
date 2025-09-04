@@ -23,7 +23,6 @@ def start_eic_conflict_scheduler(app, db):
                     "apiversion": api_version
                 }
             )
-            # Change to 167.235.65.113 in production, localhost for testing
             if response.status_code == 204:
                 logging.info("EIC conflict Discord post success.")
             else:

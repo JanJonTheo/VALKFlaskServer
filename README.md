@@ -206,6 +206,14 @@ docker-compose up --build
    python app.py
    ```
 
+## Discord
+
+Further informations you'll find on the VALK Discord Server https://discord.gg/JdRBJnNS
+
+## Screenshots
+
+[Dashboard](/screenshots/Dashboard.md)
+
 ## Credits
 
 This project was developed by Cmdr JanJonTheo.

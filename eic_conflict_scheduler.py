@@ -3,6 +3,7 @@ from apscheduler.triggers.cron import CronTrigger
 import logging
 import atexit
 import requests
+import os  # hinzugefügt
 
 
 def start_eic_conflict_scheduler(app, db):
@@ -11,11 +12,15 @@ def start_eic_conflict_scheduler(app, db):
     def post_conflict_to_discord():
         try:
             logging.info("[Scheduler] Triggering /api/discord/eic-in-conflict-current-tick")
+            flask_server_url = os.getenv("FLASK_SERVER_URL_PROD")
+            api_key = os.getenv("API_KEY_PROD")
+            api_version = os.getenv("API_VERSION_PROD")
+            url = f"{flask_server_url}/api/discord/eic-in-conflict-current-tick"
             response = requests.post(
-                "http://167.235.65.113:5000/api/discord/eic-in-conflict-current-tick",
+                url,
                 headers={
-                    "apikey": "churchoficarus",
-                    "apiversion": "1.6.0"  # Header hinzugefügt
+                    "apikey": api_key,
+                    "apiversion": api_version
                 }
             )
             # Change to 167.235.65.113 in production, localhost for testing

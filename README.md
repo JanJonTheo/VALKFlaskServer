@@ -212,7 +212,7 @@ Further informations you'll find on the VALK Discord Server https://discord.gg/J
 
 ## Screenshots
 
-[Dashboard](/screenshots/Dashboard.md)
+[Dashboard](screenshots/Dashboard.MD)
 
 ## Credits
 

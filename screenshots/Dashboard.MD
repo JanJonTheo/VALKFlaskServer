@@ -30,7 +30,7 @@
 ![Bounty Voucher Redemptions](IMG_1638.jpeg)
 ![Bounty Voucher Redemptions](IMG_1639.jpeg)
 
-## CZ 
+## CZ Summary
 ![CZ](IMG_1640.jpeg)
 ![CZ](IMG_1641.jpeg)
 ![CZ](IMG_1642.jpeg)

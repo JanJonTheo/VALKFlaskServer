@@ -1,0 +1,12 @@
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.env
+.git
+.gitignore
+README.md
+.pytest_cache
+.coverage
+instance/bgs_data.db
+*.log

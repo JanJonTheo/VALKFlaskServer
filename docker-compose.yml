@@ -1,0 +1,41 @@
+services:
+  flaskserver:
+    build:
+      context: .
+    command: ["/bin/bash", "/app/entrypoint.sh"]
+    env_file:
+      - .env
+    ports:
+      - "5000:5000"
+    volumes:
+      - .:/app
+      - flask_db_data:/app/instance
+    working_dir: /app
+    networks:
+      - valk_network
+
+  streamlitdashboard:
+    build:
+      context: ../VALKStreamlitDashboard
+    command: streamlit run app.py --server.port=8501 --server.address=0.0.0.0
+    env_file:
+      - ../VALKStreamlitDashboard/.env
+    environment:
+      - API_BASE=http://flaskserver:5000/api/
+    ports:
+      - "8501:8501"
+    volumes:
+      - ../VALKStreamlitDashboard:/app
+    working_dir: /app
+    depends_on:
+      - flaskserver
+    networks:
+      - valk_network
+
+networks:
+  valk_network:
+    driver: bridge
+
+volumes:
+  flask_db_data:
+    driver: local

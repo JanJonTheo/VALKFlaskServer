@@ -1,6 +1,8 @@
-from flask import Flask, request, jsonify
-from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import text
+from flask import Flask, request, jsonify, g
+from sqlalchemy.exc import OperationalError
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import scoped_session, sessionmaker
+from sqlalchemy.engine import make_url
 from models import db, Event, MarketBuyEvent, MarketSellEvent, MissionCompletedEvent, MissionCompletedInfluence, Activity, System, Faction, Objective, ObjectiveTarget, ObjectiveTargetSettlement
 from models import SyntheticCZ, SyntheticGroundCZ
 import logging
@@ -13,19 +15,31 @@ from cmdr_sync_inara import sync_cmdrs_with_inara
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 import os
+import json
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# Discord webhook URL for sending to Bullis' Discord channel
-#DISCORD_SHOUTOUT_WEBHOOK = os.getenv("DISCORD_BULLIS_WEBHOOK_PROD")
+# Hilfsfunktion zum Abrufen des Discord-Webhooks aus dem Tenant
+def get_discord_webhook(webhook_type):
+    tenant = getattr(g, "tenant", None)
+    if tenant and "discord_webhooks" in tenant:
+        return tenant["discord_webhooks"].get(webhook_type)
+    return None
 
-# Discord webhook URL for sending to EICs' Shoutout Discord channel
-DISCORD_SHOUTOUT_WEBHOOK = os.getenv("DISCORD_SHOUTOUT_WEBHOOK_PROD")
+# Default API version
+API_VERSION = os.getenv("API_VERSION_PROD", "1.6.0")
 
-# API key for authentication
-API_KEY = os.getenv("API_KEY_PROD")
-API_VERSION = os.getenv("API_VERSION_PROD")
+# Tenant-Konfiguration laden
+TENANT_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "tenant.json")
+with open(TENANT_CONFIG_PATH, "r", encoding="utf-8") as f:
+    TENANTS = json.load(f)
+
+def get_tenant_by_apikey(apikey):
+    for tenant in TENANTS:
+        if tenant["api_key"] == apikey:
+            return tenant
+    return None
 
 # Logging setup
 logging.basicConfig(level=logging.INFO)
@@ -35,49 +49,143 @@ logger = logging.getLogger(__name__)
 last_known_tickid = {"value": None}
 
 app = Flask(__name__)
+
+# Fallback-DB: Initialisiere DB nur einmal mit Standardkonfiguration
 app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///bgs_data.db"
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 db.init_app(app)
 
 
-@app.before_request
-def initialize_database():
-    with app.app_context():
-        db.create_all()
+def set_tenant_db_config(tenant):
+    """Setzt die DB-Konfiguration für den aktuellen Tenant im Request-Kontext.
+    - Bei SQLite: Falls die Datei fehlt, wird sie inkl. Tabellenstruktur angelegt.
+    - Bei anderen DBs: Verbindung wird getestet, Fehler werden geloggt & im Request-Kontext hinterlegt.
+    """
+    if not tenant or not tenant.get("db_uri"):
+        error_msg = "Tenant oder Datenbank-URI nicht gefunden. Kein Fallback erlaubt."
+        logger.error(error_msg)
+        g.tenant_db_error = error_msg
+        return
+
+    db_uri = tenant["db_uri"]
+
+    try:
+        url = make_url(db_uri)
+        is_sqlite = url.drivername == "sqlite"
+
+        # Pfad zur SQLite-Datei ermitteln (kein Memory-DB)
+        sqlite_file_path = None
+        if is_sqlite:
+            # memory-DBs nicht anfassen
+            if url.database in (None, "", ":memory:"):
+                sqlite_file_path = None
+            else:
+                # Bei relativen Pfaden lässt SQLAlchemy sie relativ zum CWD auflösen.
+                sqlite_file_path = url.database
+                # Eventuell Verzeichnisse erstellen
+                dir_name = os.path.dirname(os.path.abspath(sqlite_file_path))
+                if dir_name and not os.path.exists(dir_name):
+                    os.makedirs(dir_name, exist_ok=True)
+
+        # Engine neu erstellen, falls URI sich geändert hat
+        engine_changed = not hasattr(g, "tenant_db_engine") or getattr(g, "tenant_db_uri", None) != db_uri
+
+        if engine_changed:
+            # Für SQLite empfehlenswerte connect_args setzen
+            connect_args = {"check_same_thread": False} if is_sqlite else {}
+            engine = create_engine(db_uri, connect_args=connect_args)
+            db.session = scoped_session(sessionmaker(bind=engine))
+            g.tenant_db_engine = engine
+            g.tenant_db_uri = db_uri
+        else:
+            engine = g.tenant_db_engine
+
+        # --- Speziell für SQLite: Datei + Schema erzeugen, wenn Datei fehlt ---
+        if is_sqlite and sqlite_file_path and not os.path.exists(sqlite_file_path):
+            logger.info(f"SQLite-Datei für Tenant nicht gefunden. Erzeuge neue DB und Tabellen: {sqlite_file_path}")
+            # Wichtig: Alle Models müssen importiert/registriert sein, damit metadata vollständig ist!
+            # Beispiel (falls nötig): from yourapp.models import *  # noqa
+            with engine.begin() as conn:
+                # Falls du Flask-SQLAlchemy nutzt:
+                db.Model.metadata.create_all(bind=conn)
+                # Falls du eine eigene Declarative Base verwendest, stattdessen:
+                # Base.metadata.create_all(bind=conn)
+
+        # Verbindung testen
+        db.session.execute(text("SELECT 1"))
+
+    except OperationalError as e:
+        logger.error(f"Tenant-Datenbank nicht gefunden oder nicht erreichbar: {db_uri} ({str(e)})")
+        g.tenant_db_error = str(e)
+    except Exception as e:
+        # Generischer Fallback für unerwartete Fehler
+        logger.exception(f"Fehler beim Setzen der Tenant-DB-Konfiguration für {db_uri}: {e}")
+        g.tenant_db_error = str(e)
+
+
+@app.teardown_appcontext
+def remove_session(exception=None):
+    db.session.remove()
 
 
 def require_api_key(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        if request.headers.get("apikey") != API_KEY:
-            logger.warning("Unauthorized access attempt")
-            return jsonify({"error": "Unauthorized"}), 401
+        apikey = request.headers.get("apikey")
+        tenant = get_tenant_by_apikey(apikey)
+        if not tenant:
+            logger.warning(f"Invalid API-Key received: {apikey}")
+            return jsonify({"error": "Unauthorized: Invalid API key"}), 401
 
-        # Validate API version header
+        g.tenant = tenant
+        set_tenant_db_config(tenant)
+
+        # Prüfe, ob ein DB-Fehler vorliegt
+        if hasattr(g, "tenant_db_error"):
+            logger.error(f"Tenant-Datenbankfehler: {g.tenant_db_error}")
+            return jsonify({"error": f"Tenant-Datenbank nicht gefunden oder nicht erreichbar: {g.tenant_db_error}"}), 500
+
         api_version = request.headers.get("apiversion")
         if not api_version:
             return jsonify({"error": "Missing required header: apiversion"}), 400
 
-        # Basic version format validation (x.y.z)
         import re
         if not re.match(r'^\d+\.\d+\.\d+$', api_version):
             return jsonify({"error": "Invalid apiversion format. Expected x.y.z notation"}), 400
 
-        # Optional: Check if API version is supported
-        if api_version != API_VERSION:
-            logger.warning(f"Client using different API version: {api_version} (server: {API_VERSION})")
-            # Note: You can decide whether to reject or just log this
+        if api_version != tenant.get("api_version", API_VERSION):
+            logger.warning(f"Client using different API version: {api_version} (tenant: {tenant.get('api_version', API_VERSION)})")
 
         return f(*args, **kwargs)
     return decorated
 
 
 def get_latest_tickid():
-    logging.info("[TickTriggerEIC] Get latest tickid...")
-    sql = text("SELECT tickid FROM event WHERE tickid IS NOT NULL ORDER BY timestamp DESC LIMIT 1")
-    latest = db.session.execute(sql).fetchone()
-    last_known_tickid["value"] = latest[0] if latest else None
-    logging.info(f"[TickTriggerEIC] Initial tickid set to: {last_known_tickid['value']}")
+    """
+    Holt für alle Tenants das aktuellste tickid aus deren Datenbank
+    und speichert es im last_known_tickid-Dict unter dem Tenant-Namen.
+    """
+    logging.info("[TickTriggerEIC] Get latest tickid für alle Tenants...")
+    last_known_tickid.clear()
+    for tenant in TENANTS:
+        db_uri = tenant.get("db_uri")
+        tenant_name = tenant.get("name") or tenant.get("api_key")
+        if not db_uri:
+            logging.warning(f"Tenant {tenant_name} hat keine db_uri, überspringe.")
+            continue
+        try:
+            url = make_url(db_uri)
+            is_sqlite = url.drivername == "sqlite"
+            connect_args = {"check_same_thread": False} if is_sqlite else {}
+            engine = create_engine(db_uri, connect_args=connect_args)
+            with engine.connect() as conn:
+                sql = text("SELECT tickid FROM event WHERE tickid IS NOT NULL ORDER BY timestamp DESC LIMIT 1")
+                latest = conn.execute(sql).fetchone()
+                last_known_tickid[tenant_name] = latest[0] if latest else None
+                logging.info(f"[TickTriggerEIC] {tenant_name}: tickid = {last_known_tickid[tenant_name]}")
+        except Exception as e:
+            logging.error(f"[TickTriggerEIC] Fehler bei Tenant {tenant_name}: {e}")
+            last_known_tickid[tenant_name] = None
 
 
 @app.route("/events", methods=["POST"])
@@ -753,23 +861,36 @@ def send_all_top5_to_discord():
     }
 
     try:
-        sections = []
-        for title, q in base_queries.items():
-            rows = db.session.execute(text(q["sql"])).fetchall()
-            if not rows:
+        results = []
+        for tenant in TENANTS:
+            db_uri = tenant.get("db_uri")
+            tenant_name = tenant.get("name") or tenant.get("api_key")
+            webhook_url = tenant.get("discord_webhooks", {}).get("shoutout")
+            if not db_uri or not webhook_url:
+                results.append({"tenant": tenant_name, "status": "skipped", "reason": "No DB URI or webhook"})
                 continue
-            section = f"**📊 {title}**\n```text\n{q['format'](rows)}\n```"
-            sections.append(section)
-
-        if not sections:
-            return jsonify({"error": "No data"}), 404
-
-        full_message = "\n\n".join(sections)
-        resp = http_requests.post(DISCORD_SHOUTOUT_WEBHOOK, json={"content": full_message})
-        if resp.status_code != 204:
-            return jsonify({"error": "Discord error", "response": resp.text}), 500
-
-        return jsonify({"status": "Top 5 sent to Discord"}), 200
+            url = make_url(db_uri)
+            is_sqlite = url.drivername == "sqlite"
+            connect_args = {"check_same_thread": False} if is_sqlite else {}
+            engine = create_engine(db_uri, connect_args=connect_args)
+            with engine.connect() as conn:
+                sections = []
+                for title, q in base_queries.items():
+                    rows = conn.execute(text(q["sql"])).fetchall()
+                    if not rows:
+                        continue
+                    section = f"**📊 {title}**\n```text\n{q['format'](rows)}\n```"
+                    sections.append(section)
+                if not sections:
+                    results.append({"tenant": tenant_name, "status": "no data"})
+                    continue
+                full_message = f"**{tenant_name}**\n\n" + "\n\n".join(sections)
+                resp = http_requests.post(webhook_url, json={"content": full_message})
+                if resp.status_code != 204:
+                    results.append({"tenant": tenant_name, "status": "discord error", "response": resp.text})
+                else:
+                    results.append({"tenant": tenant_name, "status": "sent"})
+        return jsonify(results), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -1588,7 +1709,9 @@ def syntheticgroundcz_summary():
 if __name__ == "__main__":
     print("Starting BGS Data API...")
     with app.app_context():
+        # Fallback-DB: Erstelle alle Tabellen, wenn sie nicht existieren
         db.create_all()
+        # Initialisiere den Tick-Wert
         get_latest_tickid()
 
     from eic_shoutout_scheduler import start_scheduler
@@ -1596,8 +1719,11 @@ if __name__ == "__main__":
     from fdev_tick_monitor import start_tick_watch_scheduler, first_tick_check
     first_tick_check()
     start_tick_watch_scheduler()
+
+    # TODO: Multi-Tenant: Conflict Scheduler für jeden Tenant starten
     from eic_conflict_scheduler import start_eic_conflict_scheduler
     start_eic_conflict_scheduler(app, db)
+
     from cmdr_sync_inara import start_cmdr_sync_scheduler
     start_cmdr_sync_scheduler(app, db)
     app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)

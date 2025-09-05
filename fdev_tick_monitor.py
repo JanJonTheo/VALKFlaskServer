@@ -5,17 +5,21 @@ import os
 from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+import json
 
 load_dotenv()
 
-# Discord webhook URL for sending to Bullis' Discord channel
-#DISCORD_SHOUTOUT_WEBHOOK = os.getenv("DISCORD_BULLIS_WEBHOOK_PROD")
+# Tenant-Konfiguration laden
+TENANT_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "tenant.json")
+with open(TENANT_CONFIG_PATH, "r", encoding="utf-8") as f:
+    TENANTS = json.load(f)
 
-# Discord webhook URL for sending to EICs' BGS Discord channel
-DISCORD_TICK_WEBHOOK = os.getenv("DISCORD_BGS_WEBHOOK_PROD")
-
-# Zustandscontainer für letzten bekannten Tick
 last_tick = {"value": None}
+
+
+def get_discord_webhook_for_tenant(tenant, webhook_type="bgs"):
+    """Gibt den konfigurierten Discord-Webhook für einen Tenant zurück."""
+    return tenant.get("discord_webhooks", {}).get(webhook_type)
 
 
 def first_tick_check():
@@ -67,19 +71,24 @@ def start_tick_watch_scheduler():
 
     def send_tick_notice(tick_time):
         """
-        Sends a notification to Discord when a new tick is detected.
+        Sends a notification to all tenant Discord webhooks when a new tick is detected.
         """
         message = {
             "content": f"**✅ New FDEV (Zoy) BGS Tick detected!**\nTime: `{tick_time}`"
         }
-        try:
-            r = requests.post(DISCORD_TICK_WEBHOOK, json=message)
-            if r.status_code in (200, 204):
-                logging.info("[TickPollZoy] FDEV (Zoy) Tick notification sent to Discord")
-            else:
-                logging.warning(f"[TickPollZoy] Discord returned status {r.status_code}: {r.text}")
-        except Exception as e:
-            logging.error(f"[TickPollZoy] Exception while sending Discord notification: {e}")
+        for tenant in TENANTS:
+            webhook_url = get_discord_webhook_for_tenant(tenant, "bgs")
+            if not webhook_url:
+                logging.warning(f"[TickPollZoy] Kein BGS-Webhook für Tenant {tenant.get('name')}, überspringe.")
+                continue
+            try:
+                r = requests.post(webhook_url, json=message)
+                if r.status_code in (200, 204):
+                    logging.info(f"[TickPollZoy] FDEV (Zoy) Tick notification sent to Discord ({tenant.get('name')})")
+                else:
+                    logging.warning(f"[TickPollZoy] Discord returned status {r.status_code} for {tenant.get('name')}: {r.text}")
+            except Exception as e:
+                logging.error(f"[TickPollZoy] Exception while sending Discord notification for {tenant.get('name')}: {e}")
 
     scheduler.add_job(poll_tick_info, IntervalTrigger(minutes=5))
     scheduler.start()

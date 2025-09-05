@@ -4,27 +4,32 @@ import requests
 import time
 import logging
 import os
+import json
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.engine import make_url
+from sqlalchemy.orm import sessionmaker
 
 load_dotenv()
-
 logger = logging.getLogger(__name__)
 
 # API key for Inara API access (personal key, not shared)
 INARA_API_KEY = os.getenv("INARA_API_KEY")
 
-# Discord webhook URL for sending to Bullis' Discord channel
-DISCORD_DEBUG_URL = os.getenv("DISCORD_BULLIS_WEBHOOK_PROD")
+# Tenant-Konfiguration laden
+TENANT_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "tenant.json")
+with open(TENANT_CONFIG_PATH, "r", encoding="utf-8") as f:
+    TENANTS = json.load(f)
 
 
-def fetch_inara_profile(cmdr_name):
+def fetch_inara_profile(cmdr_name, inara_api_key):
     payload = {
         "header": {
             "appName": "EICChatBot",
             "appVersion": "1.0",
             "isDeveloped": True,
-            "APIkey": INARA_API_KEY
+            "APIkey": inara_api_key
         },
         "events": [
             {
@@ -76,7 +81,7 @@ def fetch_inara_profile(cmdr_name):
         return None
 
 
-def sync_cmdrs_with_inara(db=None):
+def sync_cmdrs_with_inara(db=None, inara_api_key=None):
     logger.info("[Sync] Starting Cmdr sync with Inara...")
 
     cmdrs = db.session.query(Event.cmdr).filter(Event.cmdr != None).distinct().limit(100).all()
@@ -88,7 +93,7 @@ def sync_cmdrs_with_inara(db=None):
         logger.info(f"[Sync] Syncing Cmdr: {cmdr_name}")
 
         existing = Cmdr.query.filter_by(name=cmdr_name).first()
-        profile = fetch_inara_profile(cmdr_name)
+        profile = fetch_inara_profile(cmdr_name, inara_api_key)
 
         if profile is not None and profile.get("_rate_limited"):
             logger.warning("[Sync] Inara API rate limit reached – sync aborted.")
@@ -118,7 +123,7 @@ def sync_cmdrs_with_inara(db=None):
     logger.info("[Sync] Cmdr sync completed.")
 
 
-def run_cmdr_sync_task(app, db):
+def run_cmdr_sync_task(app, db=None):
     import requests as http
     from io import StringIO
 
@@ -129,26 +134,47 @@ def run_cmdr_sync_task(app, db):
         logger.addHandler(handler)
 
         try:
-            sync_cmdrs_with_inara(db=db)
+            # Multi-Tenant: Für jeden Tenant synchronisieren
+            for tenant in TENANTS:
+                inara_api_key = tenant.get("inara_api_key") or os.getenv("INARA_API_KEY")
+                db_uri = tenant.get("db_uri")
+                tenant_name = tenant.get("name") or tenant.get("api_key")
+                # NEU: Discord Bullis Webhook pro Tenant
+                discord_bullis_url = tenant.get("discord_webhooks", {}).get("bullis")
+                if not db_uri or not inara_api_key:
+                    logger.warning(f"[Sync] Tenant {tenant_name} ohne DB-URI oder INARA_API_KEY, überspringe.")
+                    continue
+                url = make_url(db_uri)
+                is_sqlite = url.drivername == "sqlite"
+                connect_args = {"check_same_thread": False} if is_sqlite else {}
+                engine = create_engine(db_uri, connect_args=connect_args)
+                Session = sessionmaker(bind=engine)
+                session = Session()
+                logger.info(f"[Sync] Starte Cmdr-Sync für Tenant: {tenant_name}")
+                try:
+                    sync_cmdrs_with_inara(db=session, inara_api_key=inara_api_key)
+                finally:
+                    session.close()
+
+                # Discord-Nachricht pro Tenant senden
+                log_text = log_buffer.getvalue()
+                log_lines = [line for line in log_text.splitlines() if "[Sync]" in line]
+                summary = "\n".join(log_lines[-25:]) or "No Cmdrs synced."
+                content = f"🧠 **Daily Cmdr Sync für {tenant_name}**\n```text\n{summary}\n```"
+                if len(content) > 1900:
+                    content = content[:1890] + "\n...```"
+                if discord_bullis_url:
+                    try:
+                        resp = http.post(discord_bullis_url, json={"content": content})
+                        if resp.status_code != 204:
+                            logger.warning(f"[SyncTask] Discord failed for {tenant_name}: {resp.status_code} {resp.text}")
+                    except Exception as e:
+                        logger.error(f"[SyncTask] Discord send error for {tenant_name}: {e}")
+
         except Exception as e:
             logger.error(f"[SyncTask] Unexpected error: {e}")
 
         logger.removeHandler(handler)
-
-        log_text = log_buffer.getvalue()
-        log_lines = [line for line in log_text.splitlines() if "[Sync]" in line]
-        summary = "\n".join(log_lines[-25:]) or "No Cmdrs synced."
-
-        content = f"🧠 **Daily Cmdr Sync**\n```text\n{summary}\n```"
-        if len(content) > 1900:
-            content = content[:1890] + "\n...```"
-
-        try:
-            resp = http.post(DISCORD_DEBUG_URL, json={"content": content})
-            if resp.status_code != 204:
-                logger.warning(f"[SyncTask] Discord failed: {resp.status_code} {resp.text}")
-        except Exception as e:
-            logger.error(f"[SyncTask] Discord send error: {e}")
 
 
 def start_cmdr_sync_scheduler(app, db):

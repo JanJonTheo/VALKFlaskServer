@@ -6,17 +6,24 @@ from fdev_tick_monitor import last_tick
 import os
 from dotenv import load_dotenv
 
+# Tenant-Konfiguration laden
+TENANT_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "tenant.json")
+with open(TENANT_CONFIG_PATH, "r", encoding="utf-8") as f:
+    TENANTS = json.load(f)
+
 load_dotenv()
 
-# Discord webhook URL for sending to Bullis' Discord channel
-#DISCORD_SHOUTOUT_WEBHOOK = os.getenv("DISCORD_BULLIS_WEBHOOK_PROD")
 
-# Discord webhook URL for sending to EICs' BGS Discord channel
-DISCORD_CONFLICT_WEBHOOK = os.getenv("DISCORD_BGS_WEBHOOK_PROD")
+def get_tenant_by_api_key(api_key):
+    for tenant in TENANTS:
+        if tenant["api_key"] == api_key:
+            return tenant
+    return None
 
-def register_eic_conflict_routes(app, db, require_api_key):
 
-    def extract_eic_conflicts(tickid, db):
+def register_fac_conflict_routes(app, db, require_api_key):
+
+    def extract_tenant_conflicts(tickid, db, faction_name):
         results = db.session.execute(text(
             "SELECT raw_json FROM event WHERE tickid = :tick"
         ), {"tick": tickid}).fetchall()
@@ -36,11 +43,12 @@ def register_eic_conflict_routes(app, db, require_api_key):
             if not conflicts:
                 continue
 
-            eic_conflict = next((
+            # Suche Konflikt für die Fraktion des Tenants
+            tenant_conflict = next((
                 c for c in conflicts
-                if "East India Company" in (c.get("Faction1", {}).get("Name", "") + c.get("Faction2", {}).get("Name", ""))
+                if faction_name in (c.get("Faction1", {}).get("Name", "") + c.get("Faction2", {}).get("Name", ""))
             ), None)
-            if not eic_conflict:
+            if not tenant_conflict:
                 continue
 
             system = data.get("StarSystem")
@@ -54,8 +62,8 @@ def register_eic_conflict_routes(app, db, require_api_key):
             ticktime = data.get("ticktime")
 
             if system not in systems or dt > systems[system]["last_jump"]:
-                f1 = eic_conflict.get("Faction1", {})
-                f2 = eic_conflict.get("Faction2", {})
+                f1 = tenant_conflict.get("Faction1", {})
+                f2 = tenant_conflict.get("Faction2", {})
                 systems[system] = {
                     "system": system,
                     "last_jump": dt,
@@ -63,7 +71,7 @@ def register_eic_conflict_routes(app, db, require_api_key):
                     "tickid": tickid,
                     "ticktime": ticktime,
                     "galaxy_tick": last_tick,
-                    "war_type": eic_conflict.get("WarType"),
+                    "war_type": tenant_conflict.get("WarType"),
                     "faction1": {
                         "name": f1.get("Name"),
                         "stake": f1.get("Stake"),
@@ -83,9 +91,16 @@ def register_eic_conflict_routes(app, db, require_api_key):
         return systems
 
 
-    @app.route("/api/eic-in-conflict-current-tick", methods=["GET"])
+    @app.route("/api/fac-in-conflict-current-tick", methods=["GET"])
     @require_api_key
-    def get_eic_conflicts():
+    def get_fac_conflicts():
+        # Tenant anhand API-Key bestimmen
+        api_key = request.headers.get("apikey")
+        tenant = get_tenant_by_api_key(api_key)
+        if not tenant:
+            return jsonify({"error": "Invalid API key"}), 403
+        faction_name = tenant["faction_name"]
+
         tickids = db.session.execute(text(
             "SELECT DISTINCT tickid FROM event ORDER BY timestamp DESC LIMIT 2"
         )).fetchall()
@@ -102,7 +117,7 @@ def register_eic_conflict_routes(app, db, require_api_key):
         }
 
         for label, tickid in [("current_tick", tick_current), ("previous_tick", tick_previous)]:
-            systems = extract_eic_conflicts(tickid, db)
+            systems = extract_tenant_conflicts(tickid, db, faction_name)
             for s in systems.values():
                 s["last_jump"] = s["last_jump"].isoformat()
                 s["cmdrs"] = sorted(s["cmdrs"])
@@ -113,9 +128,17 @@ def register_eic_conflict_routes(app, db, require_api_key):
         return jsonify(data)
 
 
-    @app.route("/api/discord/eic-in-conflict-current-tick", methods=["POST"])
+    @app.route("/api/discord/fac-in-conflict-current-tick", methods=["POST"])
     @require_api_key
-    def send_eic_conflicts_to_discord():
+    def send_fac_conflicts_to_discord():
+        # Tenant anhand API-Key bestimmen
+        api_key = request.headers.get("apikey")
+        tenant = get_tenant_by_api_key(api_key)
+        if not tenant:
+            return jsonify({"error": "Invalid API key"}), 403
+        faction_name = tenant["faction_name"]
+        discord_webhook = tenant["discord_webhooks"].get("bgs")
+
         tickids = db.session.execute(text(
             "SELECT DISTINCT tickid FROM event ORDER BY timestamp DESC LIMIT 2"
         )).fetchall()
@@ -126,25 +149,16 @@ def register_eic_conflict_routes(app, db, require_api_key):
         tick_current = tickids[0][0]
         tick_previous = tickids[1][0]
 
-        # Extract EIC conflicts for current and previous ticks
-        #sections = [
-        #    ("Current Tick", extract_eic_conflicts(tick_current, db)),
-        #    ("Previous Tick", extract_eic_conflicts(tick_previous, db))
-        #]
-
-        # For now, only current tick
         sections = [
-             ("Current Tick", extract_eic_conflicts(tick_current, db))
+             ("Current Tick", extract_tenant_conflicts(tick_current, db, faction_name))
         ]
 
-        message_lines = ["__**🛡️ Detected EIC Conflicts**__", ""]
+        message_lines = [f"__**🛡️ Detected {faction_name} Conflicts**__", ""]
 
         for label, systems in sections:
             if not systems:
                 continue
 
-            #message_lines.append(f"__**{label}**__")
-            #message_lines.append(f"Tick ID: {tick_current if label == 'Current Tick' else tick_previous}\n")
             for entry in sorted(systems.values(), key=lambda x: x["last_jump"], reverse=True):
                 message_lines.append(f"**{entry['system']} ({entry['war_type']})**")
                 message_lines.append("```")
@@ -161,15 +175,14 @@ def register_eic_conflict_routes(app, db, require_api_key):
                 message_lines.append("")
 
         if len(message_lines) <= 2:
-            #return jsonify({"status": "No EIC conflicts in current or previous tick"}), 200
-            status_message = "No EIC conflicts in current tick (Galaxy Tick: {})".format(last_tick)
+            status_message = f"No {faction_name} conflicts in current tick (Galaxy Tick: {last_tick})"
             return jsonify({"status": status_message}), 200
 
         payload = {
             "content": "\n".join(message_lines)
         }
 
-        response = requests.post(DISCORD_CONFLICT_WEBHOOK, json=payload)
+        response = requests.post(discord_webhook, json=payload)
         if response.status_code != 204:
             return jsonify({"error": f"Discord responded with {response.status_code}"}), 500
 

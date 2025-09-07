@@ -245,9 +245,8 @@ def format_discord_summary(app=None, db=None):
                 logging.error(f"Discord post failed for {tenant.get('name')}: {response.status_code} {response.text}")
 
 
-def send_syntheticcz_summary_to_discord(app, db, period="all"):
+def send_syntheticcz_summary_to_discord(app, db, period="all", tenant=None):
     init_logger()
-    tenants = get_tenants()
     from sqlalchemy import text
     import requests
 
@@ -290,14 +289,20 @@ def send_syntheticcz_summary_to_discord(app, db, period="all"):
         date_filter = "1=1"
         period_label = "All Time"
 
-    for tenant in tenants:
-        engine = get_engine_for_tenant(tenant)
+    # Änderung: tenants-Liste bestimmen
+    if tenant is not None:
+        tenants = [tenant]
+    else:
+        tenants = get_tenants()
+
+    for t in tenants:
+        engine = get_engine_for_tenant(t)
         if not engine:
-            logging.warning(f"Kein DB-URI für Tenant {tenant.get('name')}, überspringe.")
+            logging.warning(f"Kein DB-URI für Tenant {t.get('name')}, überspringe.")
             continue
-        webhook_url = get_discord_webhook(tenant, "shoutout")
+        webhook_url = get_discord_webhook(t, "shoutout")
         if not webhook_url:
-            logging.warning(f"Kein Discord-Webhook für Tenant {tenant.get('name')}, überspringe.")
+            logging.warning(f"Kein Discord-Webhook für Tenant {t.get('name')}, überspringe.")
             continue
 
         with engine.connect() as conn:
@@ -338,7 +343,7 @@ def send_syntheticcz_summary_to_discord(app, db, period="all"):
             # Für jedes System eine eigene Discord-Nachricht
             for system, data in summary.items():
                 total = data.get("low", 0) + data.get("medium", 0) + data.get("high", 0)
-                lines = [f"⚔️:rocket:\n**{system} - Space CZ Summary ({period_label}) - {tenant.get('name')}**"]
+                lines = [f"⚔️:rocket:\n**{system} - Space CZ Summary ({period_label}) - {t.get('name')}**"]
                 lines.append(f"\nTotal: {total} CZs")
                 lines.append("```text")
                 lines.append(f"{'Type':<8} | {'Count':>5}")
@@ -361,14 +366,13 @@ def send_syntheticcz_summary_to_discord(app, db, period="all"):
                 msg = "\n".join(lines)
                 response = requests.post(webhook_url, json={"content": msg})
                 if response.status_code == 204:
-                    logging.info(f"SyntheticCZ Discord summary sent for {system} ({tenant.get('name')}).")
+                    logging.info(f"SyntheticCZ Discord summary sent for {system} ({t.get('name')}).")
                 else:
-                    logging.error(f"SyntheticCZ Discord post failed for {system} ({tenant.get('name')}): {response.status_code} {response.text}")
+                    logging.error(f"SyntheticCZ Discord post failed for {system} ({t.get('name')}): {response.status_code} {response.text}")
 
 
-def send_syntheticgroundcz_summary_to_discord(app, db, period="all"):
+def send_syntheticgroundcz_summary_to_discord(app, db, period="all", tenant=None):
     init_logger()
-    tenants = get_tenants()
     from sqlalchemy import text
     import requests
 
@@ -411,14 +415,20 @@ def send_syntheticgroundcz_summary_to_discord(app, db, period="all"):
         date_filter = "1=1"
         period_label = "All Time"
 
-    for tenant in tenants:
-        engine = get_engine_for_tenant(tenant)
+    # Änderung: tenants-Liste bestimmen
+    if tenant is not None:
+        tenants = [tenant]
+    else:
+        tenants = get_tenants()
+
+    for t in tenants:
+        engine = get_engine_for_tenant(t)
         if not engine:
-            logging.warning(f"Kein DB-URI für Tenant {tenant.get('name')}, überspringe.")
+            logging.warning(f"Kein DB-URI für Tenant {t.get('name')}, überspringe.")
             continue
-        webhook_url = get_discord_webhook(tenant, "shoutout")
+        webhook_url = get_discord_webhook(t, "shoutout")
         if not webhook_url:
-            logging.warning(f"Kein Discord-Webhook für Tenant {tenant.get('name')}, überspringe.")
+            logging.warning(f"Kein Discord-Webhook für Tenant {t.get('name')}, überspringe.")
             continue
 
         with engine.connect() as conn:
@@ -467,7 +477,7 @@ def send_syntheticgroundcz_summary_to_discord(app, db, period="all"):
             # Für jedes System eine Nachricht
             for system, data in summary.items():
                 total = data.get("low", 0) + data.get("medium", 0) + data.get("high", 0)
-                lines = [f"\n⚔️:gun:\n**{system} - Ground CZ Summary ({period_label}) - {tenant.get('name')}**"]
+                lines = [f"\n⚔️:gun:\n**{system} - Ground CZ Summary ({period_label}) - {t.get('name')}**"]
                 lines.append(f"\nTotal Ground CZs: {total}")
                 # Typ-Verteilung
                 lines.append("```text")
@@ -502,9 +512,9 @@ def send_syntheticgroundcz_summary_to_discord(app, db, period="all"):
                 msg = "\n".join(lines)
                 response = requests.post(webhook_url, json={"content": msg})
                 if response.status_code == 204:
-                    logging.info(f"SyntheticGroundCZ Discord summary sent for {system} ({tenant.get('name')}).")
+                    logging.info(f"SyntheticGroundCZ Discord summary sent for {system} ({t.get('name')}).")
                 else:
-                    logging.error(f"SyntheticGroundCZ Discord post failed for {system} ({tenant.get('name')}): {response.status_code} {response.text}")
+                    logging.error(f"SyntheticGroundCZ Discord post failed for {system} ({t.get('name')}): {response.status_code} {response.text}")
 
 
 def start_scheduler(app, db):

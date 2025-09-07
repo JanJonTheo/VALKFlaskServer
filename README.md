@@ -1,4 +1,4 @@
-![VALT Logo](static/VALT_logo.jpg)
+![VALT Logo](static/VALK_logo.jpg)
 
 # Flask API for BGS-Tally Data
 

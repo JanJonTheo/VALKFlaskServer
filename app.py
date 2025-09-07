@@ -3,14 +3,12 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import scoped_session, sessionmaker
 from sqlalchemy.engine import make_url
-from models import db, Event, MarketBuyEvent, MarketSellEvent, MissionCompletedEvent, MissionCompletedInfluence, Activity, System, Faction, Objective, ObjectiveTarget, ObjectiveTargetSettlement
-from models import SyntheticCZ, SyntheticGroundCZ
+from models import *
 import logging
 from functools import wraps
 import bcrypt
 from sqlalchemy import text
 import requests as http_requests
-from eic_tick_monitor import on_tick_change
 from cmdr_sync_inara import sync_cmdrs_with_inara
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
@@ -99,17 +97,6 @@ def set_tenant_db_config(tenant):
             g.tenant_db_uri = db_uri
         else:
             engine = g.tenant_db_engine
-
-        # --- Speziell für SQLite: Datei + Schema erzeugen, wenn Datei fehlt ---
-        if is_sqlite and sqlite_file_path and not os.path.exists(sqlite_file_path):
-            logger.info(f"SQLite-Datei für Tenant nicht gefunden. Erzeuge neue DB und Tabellen: {sqlite_file_path}")
-            # Wichtig: Alle Models müssen importiert/registriert sein, damit metadata vollständig ist!
-            # Beispiel (falls nötig): from yourapp.models import *  # noqa
-            with engine.begin() as conn:
-                # Falls du Flask-SQLAlchemy nutzt:
-                db.Model.metadata.create_all(bind=conn)
-                # Falls du eine eigene Declarative Base verwendest, stattdessen:
-                # Base.metadata.create_all(bind=conn)
 
         # Verbindung testen
         db.session.execute(text("SELECT 1"))
@@ -330,7 +317,6 @@ def post_events():
         if current_tickid and last_known_tickid["value"] != current_tickid:
             logger.info(f"Tick changed: {last_known_tickid['value']} → {current_tickid}")
             last_known_tickid["value"] = current_tickid
-            on_tick_change()
 
         return jsonify({"status": "success"}), 200
     except Exception as e:
@@ -449,7 +435,7 @@ def summary_api(key):
             JOIN mission_completed_event mce ON mce.event_id = mci.mission_id
             JOIN event e ON e.id = mce.event_id
             WHERE e.cmdr IS NOT NULL
-            AND mci.faction_name LIKE '%East India Company%'
+            AND mci.faction_name LIKE :faction_name_like
             AND {date_filter}
             GROUP BY e.cmdr, mci.faction_name
             ORDER BY influence DESC, e.cmdr
@@ -520,8 +506,12 @@ def summary_api(key):
 
     sql = sql_template.replace("{date_filter}", date_filter)
 
+    params = {}
+    if "faction_name LIKE :faction_name_like" in sql:
+        params["faction_name_like"] = f"%{g.tenant['faction_name']}%"
+
     try:
-        result = db.session.execute(text(sql)).fetchall()
+        result = db.session.execute(text(sql), params).fetchall()
         data = [dict(row._mapping) for row in result]
         return jsonify(data)
     except Exception as e:
@@ -632,7 +622,9 @@ def summary_top5_api(key):
             FROM mission_completed_influence mci
             JOIN mission_completed_event mce ON mce.event_id = mci.mission_id
             JOIN event e ON e.id = mce.event_id
-            WHERE e.cmdr IS NOT NULL AND mci.faction_name LIKE '%East India Company%' AND {date_filter}
+            WHERE e.cmdr IS NOT NULL 
+            AND mci.faction_name LIKE :faction_name_like
+            AND {date_filter}
             GROUP BY e.cmdr, mci.faction_name
             ORDER BY influence DESC, e.cmdr
             LIMIT 5
@@ -674,8 +666,12 @@ def summary_top5_api(key):
     date_filter = get_date_filter(period)
     sql = sql_template.replace("{date_filter}", date_filter)
 
+    params = {}
+    if "faction_name LIKE :faction_name_like" in sql:
+        params["faction_name_like"] = f"%{g.tenant['faction_name']}%"
+
     try:
-        result = db.session.execute(text(sql)).fetchall()
+        result = db.session.execute(text(sql), params).fetchall()
         data = [dict(row._mapping) for row in result]
         return jsonify(data)
     except Exception as e:
@@ -780,7 +776,8 @@ def send_all_top5_to_discord():
                 FROM mission_completed_influence mci
                 JOIN mission_completed_event mce ON mce.event_id = mci.mission_id
                 JOIN event e ON e.id = mce.event_id
-                WHERE e.cmdr IS NOT NULL AND mci.faction_name LIKE '%East India Company%' AND {date_filter}
+                WHERE e.cmdr IS NOT NULL 
+                AND mci.faction_name LIKE :faction_name_like
                 GROUP BY e.cmdr, mci.faction_name
                 ORDER BY influence DESC, e.cmdr
                 LIMIT 5
@@ -862,34 +859,39 @@ def send_all_top5_to_discord():
 
     try:
         results = []
-        for tenant in TENANTS:
-            db_uri = tenant.get("db_uri")
-            tenant_name = tenant.get("name") or tenant.get("api_key")
-            webhook_url = tenant.get("discord_webhooks", {}).get("shoutout")
-            if not db_uri or not webhook_url:
-                results.append({"tenant": tenant_name, "status": "skipped", "reason": "No DB URI or webhook"})
-                continue
-            url = make_url(db_uri)
-            is_sqlite = url.drivername == "sqlite"
-            connect_args = {"check_same_thread": False} if is_sqlite else {}
-            engine = create_engine(db_uri, connect_args=connect_args)
-            with engine.connect() as conn:
-                sections = []
-                for title, q in base_queries.items():
-                    rows = conn.execute(text(q["sql"])).fetchall()
-                    if not rows:
-                        continue
-                    section = f"**📊 {title}**\n```text\n{q['format'](rows)}\n```"
-                    sections.append(section)
-                if not sections:
-                    results.append({"tenant": tenant_name, "status": "no data"})
+        tenant = g.tenant
+        db_uri = tenant.get("db_uri")
+        tenant_name = tenant.get("name") or tenant.get("api_key")
+        webhook_url = tenant.get("discord_webhooks", {}).get("shoutout")
+        if not db_uri or not webhook_url:
+            results.append({"tenant": tenant_name, "status": "skipped", "reason": "No DB URI or webhook"})
+            return jsonify(results), 200
+        url = make_url(db_uri)
+        is_sqlite = url.drivername == "sqlite"
+        connect_args = {"check_same_thread": False} if is_sqlite else {}
+        engine = create_engine(db_uri, connect_args=connect_args)
+        with engine.connect() as conn:
+            sections = []
+            for title, q in base_queries.items():
+                params = {}
+                # Dynamischer LIKE-Parameter für "Influence EIC"
+                if title == "Influence EIC":
+                    faction_name = tenant.get("faction_name")
+                    params["faction_name_like"] = f"%{faction_name}%"
+                rows = conn.execute(text(q["sql"]), params).fetchall()
+                if not rows:
                     continue
-                full_message = f"**{tenant_name}**\n\n" + "\n\n".join(sections)
-                resp = http_requests.post(webhook_url, json={"content": full_message})
-                if resp.status_code != 204:
-                    results.append({"tenant": tenant_name, "status": "discord error", "response": resp.text})
-                else:
-                    results.append({"tenant": tenant_name, "status": "sent"})
+                section = f"**📊 {title}**\n```text\n{q['format'](rows)}\n```"
+                sections.append(section)
+            if not sections:
+                results.append({"tenant": tenant_name, "status": "no data"})
+                return jsonify(results), 200
+            full_message = f"**{tenant_name}**\n\n" + "\n\n".join(sections)
+            resp = http_requests.post(webhook_url, json={"content": full_message})
+            if resp.status_code != 204:
+                results.append({"tenant": tenant_name, "status": "discord error", "response": resp.text})
+            else:
+                results.append({"tenant": tenant_name, "status": "sent"})
         return jsonify(results), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -899,7 +901,7 @@ def send_all_top5_to_discord():
 @require_api_key
 def trigger_daily_tick_summary():
     try:
-        from eic_shoutout_scheduler import format_discord_summary
+        from fac_shoutout_scheduler import format_discord_summary
         format_discord_summary(app, db)
         return jsonify({"status": "Daily summary triggered"}), 200
     except Exception as e:
@@ -915,9 +917,11 @@ def send_syntheticcz_summary_to_discord_api():
     """
     try:
         period = request.args.get("period", "all")
-        from eic_shoutout_scheduler import send_syntheticcz_summary_to_discord
-        send_syntheticcz_summary_to_discord(app, db, period)
-        return jsonify({"status": f"SyntheticCZ-Summary für Discord gesendet ({period})"}), 200
+        from fac_shoutout_scheduler import send_syntheticcz_summary_to_discord
+        # Nur für den aktuellen Tenant senden
+        send_syntheticcz_summary_to_discord(app, db, period, tenant=g.tenant)
+        tenant_name = g.tenant.get("name") or g.tenant.get("api_key")
+        return jsonify({"status": f"SyntheticCZ-Summary für Tenant: {tenant_name} via Discord gesendet ({period})"}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -931,26 +935,18 @@ def send_syntheticgroundcz_summary_to_discord_api():
     """
     try:
         period = request.args.get("period", "all")
-        from eic_shoutout_scheduler import send_syntheticgroundcz_summary_to_discord
-        send_syntheticgroundcz_summary_to_discord(app, db, period)
-        return jsonify({"status": f"SyntheticGroundCZ-Summary für Discord gesendet ({period})"}), 200
+        from fac_shoutout_scheduler import send_syntheticgroundcz_summary_to_discord
+        # Nur für den aktuellen Tenant senden
+        send_syntheticgroundcz_summary_to_discord(app, db, period, tenant=g.tenant)
+        tenant_name = g.tenant.get("name") or g.tenant.get("api_key")
+        return jsonify({"status": f"SyntheticGroundCZ-Summary für Tenant: {tenant_name} via Discord gesendet ({period})"}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
 # Register EIC Conflict routes
-from eic_in_conflict import register_eic_conflict_routes
-register_eic_conflict_routes(app, db, require_api_key)
-
-
-@app.route("/api/debug/tick-change", methods=["POST"])
-@require_api_key
-def debug_tick_change():
-    try:
-        on_tick_change()
-        return jsonify({"status": "Tick change hook triggered"}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+from fac_in_conflict import register_fac_conflict_routes
+register_fac_conflict_routes(app, db, require_api_key)
 
 
 @app.route("/api/sync/cmdrs", methods=["POST"])
@@ -1109,7 +1105,9 @@ def leaderboard_summary():
                  FROM mission_completed_influence mci
                  JOIN mission_completed_event mce ON mce.event_id = mci.mission_id
                  JOIN event ex ON ex.id = mce.event_id
-                 WHERE ex.cmdr = e.cmdr AND mci.faction_name LIKE '%East India Company%' AND {date_filter_sub}
+                 WHERE ex.cmdr = e.cmdr 
+                 AND mci.faction_name LIKE :faction_name_like
+                 AND {date_filter_sub}
                ) AS influence_eic,
 
                (
@@ -1128,7 +1126,11 @@ def leaderboard_summary():
             ORDER BY e.cmdr
         """
 
-        result = db.session.execute(text(sql)).fetchall()
+        params = {}
+        if "faction_name LIKE :faction_name_like" in sql:
+            params["faction_name_like"] = f"%{g.tenant['faction_name']}%"
+
+        result = db.session.execute(text(sql), params).fetchall()
         data = [dict(row._mapping) for row in result]
         return jsonify(data)
 
@@ -1245,7 +1247,7 @@ def root():
     try:
         return jsonify({
             "message": "VALK Flask Server is running",
-            "version": os.getenv("API_VERSION_PROD", "1.0.0"),
+            "version": os.getenv("API_VERSION_PROD", "1.6.0"),
             "name": os.getenv("SERVER_NAME_PROD", "VALK Flask Server"),
             "endpoints": {
                 "discovery": "/discovery",
@@ -1706,24 +1708,53 @@ def syntheticgroundcz_summary():
         return jsonify({"error": str(e)}), 500
 
 
+def initialize_all_tenant_databases():
+    """
+    Prüft beim Start für alle Tenants, ob die SQLite-DB-Datei existiert.
+    Falls nicht, wird sie samt Tabellenstruktur angelegt.
+    """
+    from sqlalchemy.engine import make_url
+    from sqlalchemy import create_engine
+    for tenant in TENANTS:
+        db_uri = tenant.get("db_uri")
+        if not db_uri:
+            continue
+        url = make_url(db_uri)
+        if url.drivername == "sqlite" and url.database not in (None, "", ":memory:"):
+            sqlite_file_path = url.database
+            abs_path = os.path.abspath(sqlite_file_path)
+            dir_name = os.path.dirname(abs_path)
+            if dir_name and not os.path.exists(dir_name):
+                os.makedirs(dir_name, exist_ok=True)
+            if not os.path.exists(abs_path):
+                # Engine mit passenden connect_args für SQLite
+                engine = create_engine(db_uri, connect_args={"check_same_thread": False})
+                # Tabellenstruktur anlegen
+                with engine.begin() as conn:
+                    db.Model.metadata.create_all(bind=conn)
+                logger.info(f"Tenant-DB initialisiert: {abs_path}")
+
+
 if __name__ == "__main__":
     print("Starting BGS Data API...")
     with app.app_context():
         # Fallback-DB: Erstelle alle Tabellen, wenn sie nicht existieren
         db.create_all()
+        # Multi-Tenant: Prüfe und initialisiere alle Tenant-DBs
+        initialize_all_tenant_databases()
         # Initialisiere den Tick-Wert
         get_latest_tickid()
 
-    from eic_shoutout_scheduler import start_scheduler
+    from fac_shoutout_scheduler import start_scheduler
     start_scheduler(app, db)
     from fdev_tick_monitor import start_tick_watch_scheduler, first_tick_check
     first_tick_check()
     start_tick_watch_scheduler()
 
     # TODO: Multi-Tenant: Conflict Scheduler für jeden Tenant starten
-    from eic_conflict_scheduler import start_eic_conflict_scheduler
-    start_eic_conflict_scheduler(app, db)
+    from fac_conflict_scheduler import start_fac_conflict_scheduler
+    start_fac_conflict_scheduler(app, db)
 
     from cmdr_sync_inara import start_cmdr_sync_scheduler
     start_cmdr_sync_scheduler(app, db)
-    app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
+    app.run(host='0.0.0.0', port=5555, debug=False, use_reloader=False)

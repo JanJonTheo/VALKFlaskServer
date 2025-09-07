@@ -148,7 +148,7 @@ class CommitCrimeEvent(db.Model):
     crime_type = db.Column(db.String(128))
     faction = db.Column(db.String(128))
     victim = db.Column(db.String(128))
-    fine = db.Column(db.Integer)
+    bounty = db.Column(db.Integer)
 
 class Objective(db.Model):
     id = db.Column(db.Integer, primary_key=True)

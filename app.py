@@ -962,6 +962,19 @@ def sync_cmdrs_api():
 @app.route("/api/login", methods=["POST"])
 def login_api():
     try:
+        apikey = request.headers.get("apikey")
+        tenant = get_tenant_by_apikey(apikey)
+        if not tenant:
+            logger.warning(f"Invalid API-Key received for login: {apikey}")
+            return jsonify({"error": "Unauthorized: Invalid API key"}), 401
+
+        g.tenant = tenant
+        set_tenant_db_config(tenant)
+
+        if hasattr(g, "tenant_db_error"):
+            logger.error(f"Tenant-Datenbankfehler beim Login: {g.tenant_db_error}")
+            return jsonify({"error": f"Tenant-Datenbank nicht gefunden oder nicht erreichbar: {g.tenant_db_error}"}), 500
+
         data = request.get_json()
         username = data.get("username")
         password = data.get("password")

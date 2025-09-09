@@ -84,7 +84,7 @@ def fetch_inara_profile(cmdr_name, inara_api_key):
 def sync_cmdrs_with_inara(db=None, inara_api_key=None):
     logger.info("[Sync] Starting Cmdr sync with Inara...")
 
-    cmdrs = db.session.query(Event.cmdr).filter(Event.cmdr != None).distinct().limit(100).all()
+    cmdrs = db.query(Event.cmdr).filter(Event.cmdr != None).distinct().limit(100).all()
 
     for (cmdr_name,) in cmdrs:
         if not cmdr_name:
@@ -105,17 +105,17 @@ def sync_cmdrs_with_inara(db=None, inara_api_key=None):
 
         if not existing:
             logger.info(f"[Sync] Adding Cmdr: {cmdr_name}")
-            db.session.add(Cmdr(name=cmdr_name, **profile))
+            db.add(Cmdr(name=cmdr_name, **profile))
         else:
             logger.info(f"[Sync] Updating Cmdr: {cmdr_name}")
             for k, v in profile.items():
                 setattr(existing, k, v)
 
         try:
-            db.session.commit()
+            db.commit()
         except Exception as e:
             logger.error(f"[Sync] Commit failed for Cmdr '{cmdr_name}': {e}")
-            db.session.rollback()
+            db.rollback()
 
         logger.info("[Sync] Slowing down 60s to avoid hitting Inara API rate limits...")
         time.sleep(60)
@@ -182,9 +182,9 @@ def start_cmdr_sync_scheduler(app, db):
     scheduler.add_job(
         func=lambda: run_cmdr_sync_task(app, db),
         trigger="cron",
-        hour=3, minute=0,
+        hour=1, minute=0,
         id="cmdr_sync_daily",
         replace_existing=True
     )
     scheduler.start()
-    logger.info("[SchedulerSync] Cmdr sync scheduled daily at 03:00.")
+    logger.info("[SchedulerSync] Cmdr sync scheduled daily at 01:00.")

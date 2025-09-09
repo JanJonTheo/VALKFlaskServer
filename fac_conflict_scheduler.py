@@ -16,17 +16,14 @@ def start_fac_conflict_scheduler(app, db):
         tenants = json.load(f)
 
     flask_server_url = os.getenv("FLASK_SERVER_URL_PROD")
-    # Fallback für lokale Entwicklung
-    if not flask_server_url:
-        flask_server_url = "http://localhost:5555"
 
     def make_post_conflict_to_discord(tenant):
         def post_conflict_to_discord():
             try:
-                logging.info(f"[Scheduler] Triggering /api/discord/eic-in-conflict-current-tick for tenant {tenant.get('name') or tenant.get('api_key')}")
+                logging.info(f"[Scheduler] Triggering /api/discord/fac-in-conflict-current-tick for tenant {tenant.get('name') or tenant.get('api_key')}")
                 api_key = tenant.get("api_key")
                 api_version = tenant.get("api_version") or os.getenv("API_VERSION_PROD")
-                url = f"{flask_server_url}/api/discord/eic-in-conflict-current-tick"
+                url = f"{flask_server_url}/api/discord/fac-in-conflict-current-tick"
                 response = requests.post(
                     url,
                     headers={

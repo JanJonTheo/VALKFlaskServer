@@ -423,6 +423,24 @@
               ]
             }
           }
+        },
+        {
+          "name": "FSDJump Factions (24h)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/fsdjump-factions",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "fsdjump-factions"]
+            }
+          }
         }
       ]
     },

@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify, g
 from sqlalchemy.exc import OperationalError
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, func, desc
 from sqlalchemy.orm import scoped_session, sessionmaker
 from sqlalchemy.engine import make_url
 from models import *
@@ -15,6 +15,7 @@ from dateutil.relativedelta import relativedelta
 import os
 import json
 from dotenv import load_dotenv
+import ast
 
 load_dotenv()
 
@@ -49,9 +50,9 @@ last_known_tickid = {"value": None}
 app = Flask(__name__)
 
 # Fallback-DB: Initialisiere DB nur einmal mit Standardkonfiguration
-app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///bgs_data.db"
-app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-db.init_app(app)
+#app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///bgs_data.db"
+#app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+#db.init_app(app)
 
 
 def set_tenant_db_config(tenant):
@@ -322,6 +323,7 @@ def post_events():
     except Exception as e:
         db.session.rollback()
         logger.error(f"Event processing error: {str(e)}")
+        logger.error(f"Event Request Json: {str(request.get_json())}")
         return jsonify({"error": str(e)}), 400
 
 @app.route("/activities", methods=["PUT"])
@@ -699,6 +701,67 @@ def query_table(tablename):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/fsdjump-factions", methods=["GET"])
+@require_api_key
+def fsdjump_factions():
+    """
+    Gibt für jedes in den letzten 24h besuchte StarSystem (FSDJump, jeweils aktuellster Datensatz pro System)
+    eine Liste aller Factions im System mit deren aktuellen Daten zurück.
+    """
+    try:
+        since = datetime.utcnow() - timedelta(hours=24)
+        subq = (
+            db.session.query(
+                func.max(Event.id).label("id")
+            )
+            .filter(Event.event == "FSDJump")
+            .filter(Event.timestamp >= since)
+            .group_by(Event.starsystem)
+            .subquery()
+        )
+        events = (
+            db.session.query(Event)
+            .filter(Event.id.in_(subq))
+            .all()
+        )
+        result = []
+        for event in events:
+            raw = event.raw_json
+            if not raw:
+                continue
+            raw_json = None
+            try:
+                raw_json = ast.literal_eval(raw)
+            except Exception as ex:
+                logger.warning(f"Error parsing raw_json for Event {event.id}: {ex}")
+                continue
+            if not raw_json or "Factions" not in raw_json or not raw_json.get("StarSystem"):
+                continue
+            factions = []
+            for fac in raw_json["Factions"]:
+                factions.append({
+                    "Name": fac.get("Name"),
+                    "FactionState": fac.get("FactionState"),
+                    "Government": fac.get("Government"),
+                    "Influence": fac.get("Influence"),
+                    "Allegiance": fac.get("Allegiance"),
+                    "Happiness": fac.get("Happiness"),
+                    "MyReputation": fac.get("MyReputation"),
+                    "PendingStates": fac.get("PendingStates", []),
+                    "RecoveringStates": fac.get("RecoveringStates", []),
+                })
+            result.append({
+                "StarSystem": raw_json.get("StarSystem"),
+                "SystemAddress": raw_json.get("SystemAddress"),
+                "Timestamp": raw_json.get("timestamp"),
+                "Factions": factions
+            })
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"FSDJump-Factions-API Error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/summary/discord/top5all", methods=["POST"])
 @require_api_key
 def send_all_top5_to_discord():
@@ -993,7 +1056,8 @@ def login_api():
             return jsonify({
                 "id": uid,
                 "username": username,
-                "is_admin": bool(is_admin)
+                "is_admin": bool(is_admin),
+                "tenant_name": tenant.get("name")
             })
 
         return jsonify({"error": "Invalid credentials"}), 401
@@ -1118,7 +1182,7 @@ def leaderboard_summary():
                  FROM mission_completed_influence mci
                  JOIN mission_completed_event mce ON mce.event_id = mci.mission_id
                  JOIN event ex ON ex.id = mce.event_id
-                 WHERE ex.cmdr = e.cmdr 
+                 WHERE ex.cmdr = e.cmdr
                  AND mci.faction_name LIKE :faction_name_like
                  AND {date_filter_sub}
                ) AS influence_eic,
@@ -1752,7 +1816,7 @@ if __name__ == "__main__":
     print("Starting BGS Data API...")
     with app.app_context():
         # Fallback-DB: Erstelle alle Tabellen, wenn sie nicht existieren
-        db.create_all()
+        #db.create_all()
         # Multi-Tenant: Prüfe und initialisiere alle Tenant-DBs
         initialize_all_tenant_databases()
         # Initialisiere den Tick-Wert

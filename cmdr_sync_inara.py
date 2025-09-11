@@ -28,7 +28,7 @@ def fetch_inara_profile(cmdr_name, inara_api_key):
         "header": {
             "appName": "EICChatBot",
             "appVersion": "1.0",
-            "isDeveloped": True,
+            "isDeveloped": False,
             "APIkey": inara_api_key
         },
         "events": [
@@ -81,7 +81,7 @@ def fetch_inara_profile(cmdr_name, inara_api_key):
         return None
 
 
-def sync_cmdrs_with_inara(db=None, inara_api_key=None):
+def sync_cmdrs_with_inara(db=None, inara_api_key=None, tenant_name="Default"):
     logger.info("[Sync] Starting Cmdr sync with Inara...")
 
     cmdrs = db.query(Event.cmdr).filter(Event.cmdr != None).distinct().limit(100).all()
@@ -90,37 +90,45 @@ def sync_cmdrs_with_inara(db=None, inara_api_key=None):
         if not cmdr_name:
             continue
 
-        logger.info(f"[Sync] Syncing Cmdr: {cmdr_name}")
+        logger.info(f"[Sync] Tenant: {tenant_name} - Syncing Cmdr: {cmdr_name}")
 
-        existing = Cmdr.query.filter_by(name=cmdr_name).first()
+        # Änderung: Benutze die aktuelle Session für die Abfrage
+        existing = db.query(Cmdr).filter_by(name=cmdr_name).first()
         profile = fetch_inara_profile(cmdr_name, inara_api_key)
 
         if profile is not None and profile.get("_rate_limited"):
-            logger.warning("[Sync] Inara API rate limit reached – sync aborted.")
+            logger.warning(f"[Sync] Tenant: {tenant_name} - Inara API rate limit reached – sync aborted.")
+            logger.info(f"[Sync] Tenant: {tenant_name} - Slowing down 60s to avoid hitting Inara API rate limits...")
+            time.sleep(60)
             break
 
         if not profile:
-            logger.warning(f"[Sync] No data received for Cmdr: {cmdr_name}")
+            logger.warning(f"[Sync] Tenant: {tenant_name}- No data received for Cmdr: {cmdr_name}")
+            logger.info(f"[Sync] Tenant: {tenant_name} - Slowing down 60s to avoid hitting Inara API rate limits...")
+            time.sleep(60)
             continue
 
         if not existing:
-            logger.info(f"[Sync] Adding Cmdr: {cmdr_name}")
+            logger.info(f"[Sync] Tenant: {tenant_name} - Adding Cmdr: {cmdr_name}")
             db.add(Cmdr(name=cmdr_name, **profile))
+            logger.info(f"[Sync] Tenant: {tenant_name} - Slowing down 60s to avoid hitting Inara API rate limits...")
+            time.sleep(60)
         else:
-            logger.info(f"[Sync] Updating Cmdr: {cmdr_name}")
+            logger.info(f"[Sync] Tenant: {tenant_name} - Updating Cmdr: {cmdr_name}")
             for k, v in profile.items():
                 setattr(existing, k, v)
+            logger.info(f"[Sync] Tenant: {tenant_name} - Slowing down 60s to avoid hitting Inara API rate limits...")
+            time.sleep(60)
 
         try:
             db.commit()
         except Exception as e:
-            logger.error(f"[Sync] Commit failed for Cmdr '{cmdr_name}': {e}")
+            logger.error(f"[Sync] Tenant: {tenant_name} - Commit failed for Cmdr '{cmdr_name}': {e}")
+            logger.info(f"[Sync] Tenant: {tenant_name} - Slowing down 60s to avoid hitting Inara API rate limits...")
+            time.sleep(60)
             db.rollback()
 
-        logger.info("[Sync] Slowing down 60s to avoid hitting Inara API rate limits...")
-        time.sleep(60)
-
-    logger.info("[Sync] Cmdr sync completed.")
+    logger.info(f"[Sync] Tenant: {tenant_name} - Cmdr sync completed.")
 
 
 def run_cmdr_sync_task(app, db=None):
@@ -142,7 +150,7 @@ def run_cmdr_sync_task(app, db=None):
                 # NEU: Discord Bullis Webhook pro Tenant
                 discord_bullis_url = tenant.get("discord_webhooks", {}).get("bullis")
                 if not db_uri or not inara_api_key:
-                    logger.warning(f"[Sync] Tenant {tenant_name} ohne DB-URI oder INARA_API_KEY, überspringe.")
+                    logger.warning(f"[Sync] Tenant: {tenant_name} - ohne DB-URI oder INARA_API_KEY, überspringe.")
                     continue
                 url = make_url(db_uri)
                 is_sqlite = url.drivername == "sqlite"
@@ -150,29 +158,29 @@ def run_cmdr_sync_task(app, db=None):
                 engine = create_engine(db_uri, connect_args=connect_args)
                 Session = sessionmaker(bind=engine)
                 session = Session()
-                logger.info(f"[Sync] Starte Cmdr-Sync für Tenant: {tenant_name}")
+                logger.info(f"[Sync] Tenant: {tenant_name} - Starte Cmdr Sync...")
                 try:
-                    sync_cmdrs_with_inara(db=session, inara_api_key=inara_api_key)
+                    sync_cmdrs_with_inara(db=session, inara_api_key=inara_api_key, tenant_name=tenant_name)
                 finally:
                     session.close()
 
                 # Discord-Nachricht pro Tenant senden
                 log_text = log_buffer.getvalue()
-                log_lines = [line for line in log_text.splitlines() if "[Sync]" in line]
+                log_lines = [line for line in log_text.splitlines() if f"[Sync] Tenant: {tenant_name}" in line]
                 summary = "\n".join(log_lines[-25:]) or "No Cmdrs synced."
                 content = f"🧠 **Daily Cmdr Sync für {tenant_name}**\n```text\n{summary}\n```"
-                if len(content) > 1900:
-                    content = content[:1890] + "\n...```"
+                if len(content) > 1800:
+                    content = content[:1790] + "\n...```"
                 if discord_bullis_url:
                     try:
                         resp = http.post(discord_bullis_url, json={"content": content})
                         if resp.status_code != 204:
-                            logger.warning(f"[SyncTask] Discord failed for {tenant_name}: {resp.status_code} {resp.text}")
+                            logger.warning(f"[Sync] Tenant: {tenant_name} - Discord failed: {resp.status_code} {resp.text}")
                     except Exception as e:
-                        logger.error(f"[SyncTask] Discord send error for {tenant_name}: {e}")
+                        logger.error(f"[Sync] Tenant: {tenant_name} - Discord send error: {e}")
 
         except Exception as e:
-            logger.error(f"[SyncTask] Unexpected error: {e}")
+            logger.error(f"[Sync] Unexpected error: {e}")
 
         logger.removeHandler(handler)
 

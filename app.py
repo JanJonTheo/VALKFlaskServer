@@ -5,6 +5,7 @@ from sqlalchemy.orm import scoped_session, sessionmaker
 from sqlalchemy.engine import make_url
 from models import *
 import logging
+import logging.handlers
 from functools import wraps
 import bcrypt
 from sqlalchemy import text
@@ -14,9 +15,10 @@ from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 import os
 import json
-from dotenv import load_dotenv
 import ast
 
+# Lade Umgebungsvariablen aus .env
+from dotenv import load_dotenv
 load_dotenv()
 
 # Hilfsfunktion zum Abrufen des Discord-Webhooks aus dem Tenant
@@ -41,19 +43,23 @@ def get_tenant_by_apikey(apikey):
     return None
 
 # Logging setup
-logging.basicConfig(level=logging.INFO)
+LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+logfile_path = os.path.join(LOG_DIR, "app.log")
+logging.basicConfig(
+    level=logging.INFO,
+    handlers=[
+        logging.handlers.RotatingFileHandler(logfile_path, maxBytes=128 * 1024 * 1024, backupCount=10),
+        logging.StreamHandler()
+    ],
+    format='%(asctime)s %(levelname)s:%(name)s:%(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # Mutable container to hold last known tickid
 last_known_tickid = {"value": None}
 
 app = Flask(__name__)
-
-# Fallback-DB: Initialisiere DB nur einmal mit Standardkonfiguration
-#app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///bgs_data.db"
-#app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-#db.init_app(app)
-
 
 def set_tenant_db_config(tenant):
     """Setzt die DB-Konfiguration für den aktuellen Tenant im Request-Kontext.
@@ -1215,573 +1221,297 @@ def leaderboard_summary():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/summary/recruits", methods=["GET"])
+@app.route("/api/system-summary/", defaults={"system_name": None}, methods=["GET"])
+@app.route("/api/system-summary/<system_name>", methods=["GET"])
 @require_api_key
-def summary_recruits():
+def system_summary(system_name):
+    """
+    Gibt eine Systemzusammenfassung aus der in .env konfigurierten bgs_data_eddn zurück.
+    Optional können Query-Parameter genutzt werden:
+    - faction: alle Systeme, in denen diese Faction präsent ist
+    - controlling_faction: alle Systeme, die von dieser Faction kontrolliert werden
+    - controlling_power: alle Systeme, die von dieser Power kontrolliert werden
+    - power: alle Systeme, die von diesem Power beeinflusst werden
+    - state: alle Systeme, in denen eine Faction mit diesem State (state oder active_states) präsent ist
+    - recovering_state: alle Systeme, in denen eine Faction mit diesem Recovering State präsent ist
+    - pending_state: alle Systeme, in denen eine Faction mit diesem Pending State präsent ist
+    - has_conflict: true/1 → alle Systeme mit mindestens einem Conflict
+    - system_name: expliziter Systemname (optional)
+    """
     try:
-        sql = """
-              SELECT e.cmdr                                                      AS commander, \
-                     CASE WHEN COUNT(e.id) > 0 THEN 'Yes' ELSE 'No' END          AS has_data, \
-                     MAX(e.timestamp)                                            AS last_active, \
-                     CAST(julianday('now') - julianday(MIN(e.timestamp)) AS INT) AS days_since_join, \
-                     (SELECT COALESCE(SUM(mb.count), 0) + COALESCE((SELECT SUM(ms.count)
-                                                                    FROM market_sell_event ms
-                                                                             JOIN event e2 ON e2.id = ms.event_id
-                                                                    WHERE e2.cmdr = e.cmdr), 0)
-                      FROM market_buy_event mb
-                               JOIN event e1 ON e1.id = mb.event_id
-                      WHERE e1.cmdr = e.cmdr)                                    AS tonnage, \
-                     (SELECT COUNT(*)
-                      FROM mission_completed_event mc
-                               JOIN event ev ON ev.id = mc.event_id
-                      WHERE ev.cmdr = e.cmdr)                                    AS mission_count, \
-                     (SELECT SUM(rv.amount)
-                      FROM redeem_voucher_event rv
-                               JOIN event ev ON ev.id = rv.event_id
-                      WHERE ev.cmdr = e.cmdr \
-                        AND rv.type = 'bounty')                                  AS bounty_claims, \
-                     (SELECT SUM(total)
-                      FROM (SELECT se.earnings AS total \
-                            FROM sell_exploration_data_event se \
-                                     JOIN event ev ON ev.id = se.event_id \
-                            WHERE ev.cmdr = e.cmdr \
-                            UNION ALL \
-                            SELECT me.total_earnings AS total \
-                            FROM multi_sell_exploration_data_event me \
-                                     JOIN event ev ON ev.id = me.event_id \
-                            WHERE ev.cmdr = e.cmdr))                             AS exp_value, \
-                     (SELECT SUM(rv.amount)
-                      FROM redeem_voucher_event rv
-                               JOIN event ev ON ev.id = rv.event_id
-                      WHERE ev.cmdr = e.cmdr \
-                        AND rv.type = 'CombatBond')                              AS combat_bonds, \
-                     (SELECT SUM(cc.bounty)
-                      FROM commit_crime_event cc
-                               JOIN event ev ON ev.id = cc.event_id
-                      WHERE ev.cmdr = e.cmdr)                                    AS bounty_fines
-              FROM event e
-                       JOIN cmdr c ON c.name = e.cmdr
-              WHERE e.cmdr IS NOT NULL \
-                AND c.squadron_rank = 'Recruit'
-              GROUP BY e.cmdr
-              ORDER BY days_since_join ASC \
-              """
-        result = db.session.execute(text(sql)).fetchall()
-        data = [dict(row._mapping) for row in result]
-        return jsonify(data)
+        eddn_db_uri = os.getenv("EDDN_DATABASE")
+        if not eddn_db_uri:
+            return jsonify({"error": "EDDN_DATABASE not configured in .env"}), 500
+
+        eddn_engine = create_engine(eddn_db_uri)
+        params = request.args
+        faction = params.get("faction")
+        controlling_faction = params.get("controlling_faction")
+        controlling_power = params.get("controlling_power")
+        power = params.get("power")
+        state = params.get("state")
+        recovering_state = params.get("recovering_state")
+        pending_state = params.get("pending_state")  # <--- NEU
+        has_conflict = params.get("has_conflict")
+
+        with eddn_engine.connect() as conn:
+            # Falls einer der Filter gesetzt ist oder kein Systemname angegeben ist, Systemliste liefern
+            if any([faction, controlling_faction, controlling_power, power, state, recovering_state, pending_state, has_conflict]) or not system_name:
+                systems = None
+
+                # Faction-Präsenz
+                if faction:
+                    rows = conn.execute(
+                        text("SELECT DISTINCT system_name FROM eddn_faction WHERE name = :faction COLLATE NOCASE"),
+                        {"faction": faction}
+                    ).fetchall()
+                    systems = set(r[0] for r in rows) if systems is None else systems & set(r[0] for r in rows)
+
+                # Kontrollierende Faction
+                if controlling_faction:
+                    rows = conn.execute(
+                        text("SELECT DISTINCT system_name FROM eddn_system_info WHERE controlling_faction = :cf COLLATE NOCASE"),
+                        {"cf": controlling_faction}
+                    ).fetchall()
+                    systems = set(r[0] for r in rows) if systems is None else systems & set(r[0] for r in rows)
+
+                # Kontrollierende Power
+                if controlling_power:
+                    rows = conn.execute(
+                        text("SELECT DISTINCT system_name FROM eddn_system_info WHERE controlling_power = :cp COLLATE NOCASE"),
+                        {"cp": controlling_power}
+                    ).fetchall()
+                    systems = set(r[0] for r in rows) if systems is None else systems & set(r[0] for r in rows)
+
+                # Power (aus SystemInfo oder Powerplay)
+                if power:
+                    # SystemInfo
+                    rows_si = conn.execute(
+                        text("SELECT DISTINCT system_name FROM eddn_system_info WHERE controlling_power = :power COLLATE NOCASE"),
+                        {"power": power}
+                    ).fetchall()
+                    # Powerplay (JSON-Array)
+                    rows_pp = conn.execute(
+                        text("SELECT DISTINCT system_name FROM eddn_powerplay WHERE json_extract(power, '$[0]') = :power COLLATE NOCASE OR power LIKE :power_like"),
+                        {"power": power, "power_like": f'%{power}%'}
+                    ).fetchall()
+                    power_systems = set(r[0] for r in rows_si) | set(r[0] for r in rows_pp)
+                    systems = power_systems if systems is None else systems & power_systems
+
+                # State (aus state oder active_states)
+                if state:
+                    # state
+                    rows_state = conn.execute(
+                        text("SELECT DISTINCT system_name FROM eddn_faction WHERE state = :state COLLATE NOCASE"),
+                        {"state": state}
+                    ).fetchall()
+                    # active_states (JSON-Array)
+                    rows_active = conn.execute(
+                        text("SELECT DISTINCT system_name FROM eddn_faction WHERE active_states LIKE :state_like"),
+                        {"state_like": f'%{state}%'}
+                    ).fetchall()
+                    state_systems = set(r[0] for r in rows_state) | set(r[0] for r in rows_active)
+                    systems = state_systems if systems is None else systems & state_systems
+
+                # Recovering State (JSON-Array)
+                if recovering_state:
+                    rows = conn.execute(
+                        text("SELECT DISTINCT system_name FROM eddn_faction WHERE recovering_states LIKE :rec_like"),
+                        {"rec_like": f'%{recovering_state}%'}
+                    ).fetchall()
+                    rec_systems = set(r[0] for r in rows)
+                    systems = rec_systems if systems is None else systems & rec_systems
+
+                # Pending State (JSON-Array)
+                if pending_state:
+                    rows = conn.execute(
+                        text("SELECT DISTINCT system_name FROM eddn_faction WHERE pending_states LIKE :pending_like"),
+                        {"pending_like": f'%{pending_state}%'}
+                    ).fetchall()
+                    pending_systems = set(r[0] for r in rows)
+                    systems = pending_systems if systems is None else systems & pending_systems
+
+                # Conflict
+                if has_conflict and has_conflict.lower() in ("1", "true", "yes"):
+                    rows = conn.execute(
+                        text("SELECT DISTINCT system_name FROM eddn_conflict")
+                    ).fetchall()
+                    conflict_systems = set(r[0] for r in rows)
+                    systems = conflict_systems if systems is None else systems & conflict_systems
+
+                # Wenn kein Filter gesetzt und kein Systemname: Alle Systeme
+                if systems is None:
+                    rows = conn.execute(
+                        text("SELECT DISTINCT system_name FROM eddn_system_info")
+                    ).fetchall()
+                    systems = set(r[0] for r in rows)
+
+                # Wenn mehr als 100 Systeme gefunden wurden, Hinweis und keine Details laden
+                if len(systems) > 100:
+                    return jsonify({
+                        "error": "Zu viele Systeme gefunden. Bitte schränken Sie die Filter weiter ein.",
+                        "count": len(systems),
+                        "systems": sorted(list(systems))[:100]
+                    }), 400
+
+                # Für alle gefundenen Systeme Details liefern
+                result = []
+                for sysname in systems:
+                    sys_row = conn.execute(
+                        text("SELECT * FROM eddn_system_info WHERE system_name = :name COLLATE NOCASE"),
+                        {"name": sysname}
+                    ).mappings().first()
+                    if not sys_row:
+                        continue
+                    sys_result = {"system_info": dict(sys_row)}
+                    # Details
+                    for table, key in [
+                        ("eddn_conflict", "conflicts"),
+                        ("eddn_faction", "factions"),
+                        ("eddn_powerplay", "powerplays"),
+                    ]:
+                        rows = conn.execute(
+                            text(f"SELECT * FROM {table} WHERE system_name = :name COLLATE NOCASE"),
+                            {"name": sysname}
+                        ).mappings().all()
+                        sys_result[key] = [dict(r) for r in rows]
+                    result.append(sys_result)
+                return jsonify(result)
+
+            # Standard: Einzelnes System
+            sys_row = conn.execute(
+                text("SELECT * FROM eddn_system_info WHERE system_name = :name COLLATE NOCASE"),
+                {"name": system_name}
+            ).mappings().first()
+            if not sys_row:
+                return jsonify({"error": f"System '{system_name}' not found"}), 404
+
+            result = {"system_info": dict(sys_row)}
+            for table, key in [
+                ("eddn_conflict", "conflicts"),
+                ("eddn_faction", "factions"),
+                ("eddn_powerplay", "powerplays"),
+            ]:
+                rows = conn.execute(
+                    text(f"SELECT * FROM {table} WHERE system_name = :name COLLATE NOCASE"),
+                    {"name": system_name}
+                ).mappings().all()
+                result[key] = [dict(r) for r in rows]
+
+            return jsonify(result)
     except Exception as e:
+        logger.error(f"system_summary error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/discovery", methods=["GET"])
-def discovery():
-    """Discovery endpoint providing server capabilities and information"""
+@app.route("/api/protected-faction", methods=["GET"])
+@require_api_key
+def get_protected_factions():
+    """Liefert alle geschützten Factions für den aktuellen Tenant."""
     try:
-        discovery_response = {
-            "name": os.getenv("SERVER_NAME_PROD"),
-            "description": os.getenv("SERVER_DESCRIPTION_PROD"),
-            "url": os.getenv("SERVER_URL_PROD"),
-            "endpoints": {
-                "events": {
-                    "path": "/events",
-                    "minPeriod": "10",
-                    "maxBatch": "100"
-                },
-                "activities": {
-                    "path": "/activities",
-                    "minPeriod": "60",
-                    "maxBatch": "10"
-                },
-                "objectives": {
-                    "path": "/objectives",
-                    "minPeriod": "30",
-                    "maxBatch": "20"
-                }
-            },
-            "headers": {
-                "apikey": {
-                    "required": True,
-                    "description": "API key for authentication"
-                },
-                "apiversion": {
-                    "required": True,
-                    "description": "The version of the API in x.y.z notation",
-                    "current": API_VERSION
-                }
-            }
-        }
-
-        return jsonify(discovery_response), 200
-
+        factions = ProtectedFaction.query.all()
+        return jsonify([{
+            "id": f.id,
+            "name": f.name,
+            "webhook_url": f.webhook_url,
+            "description": f.description,
+            "protected": f.protected
+        } for f in factions])
     except Exception as e:
-        logger.error(f"Discovery endpoint error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-
-@app.route("/", methods=["GET"])
-def root():
-    """Root endpoint providing basic server information"""
+@app.route("/api/protected-faction/<int:faction_id>", methods=["GET"])
+@require_api_key
+def get_protected_faction(faction_id):
+    """Liefert eine einzelne geschützte Faction anhand der ID."""
     try:
+        faction = ProtectedFaction.query.get(faction_id)
+        if not faction:
+            return jsonify({"error": "Not found"}), 404
         return jsonify({
-            "message": "VALK Flask Server is running",
-            "version": os.getenv("API_VERSION_PROD", "1.6.0"),
-            "name": os.getenv("SERVER_NAME_PROD", "VALK Flask Server"),
-            "endpoints": {
-                "discovery": "/discovery",
-                "api": "/api/"
-            }
-        }), 200
+            "id": faction.id,
+            "name": faction.name,
+            "webhook_url": faction.webhook_url,
+            "description": faction.description,
+            "protected": faction.protected
+        })
     except Exception as e:
-        logger.error(f"Root endpoint error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-
-@app.route("/api/objectives", methods=["POST"])
-@app.route("/objectives", methods=["POST"])
+@app.route("/api/protected-faction", methods=["POST"])
 @require_api_key
-def create_objective():
+def create_protected_faction():
+    """Erstellt eine neue geschützte Faction."""
     try:
         data = request.get_json()
-
-        # Validierung der Pflichtfelder
-        if not data.get("title"):
-            return jsonify({"error": "Title is required"}), 400
-
-        objective = Objective(
-            title=data.get("title"),
-            priority=data.get("priority"),
-            type=data.get("type"),
-            system=data.get("system"),
-            faction=data.get("faction"),
+        faction = ProtectedFaction(
+            name=data["name"],
+            webhook_url=data.get("webhook_url"),
             description=data.get("description"),
-            startdate=datetime.fromisoformat(data["startdate"]) if data.get("startdate") else None,
-            enddate=datetime.fromisoformat(data["enddate"]) if data.get("enddate") else None
+            protected=bool(data.get("protected", True))
         )
-
-        for target_data in data.get("targets", []):
-            target = ObjectiveTarget(
-                type=target_data.get("type"),
-                station=target_data.get("station"),
-                system=target_data.get("system"),
-                faction=target_data.get("faction"),
-                progress=target_data.get("progress", 0),
-                targetindividual=target_data.get("targetindividual"),
-                targetoverall=target_data.get("targetoverall")
-            )
-
-            for s in target_data.get("settlements", []):
-                settlement = ObjectiveTargetSettlement(
-                    name=s.get("name"),
-                    targetindividual=s.get("targetindividual"),
-                    targetoverall=s.get("targetoverall"),
-                    progress=s.get("progress", 0)
-                )
-                target.settlements.append(settlement)
-
-            objective.targets.append(target)
-
-        db.session.add(objective)
+        db.session.add(faction)
         db.session.commit()
-
-        return jsonify({
-            "status": "Objective created successfully",
-            "id": objective.id
-        }), 201
-
-    except ValueError as e:
-        db.session.rollback()
-        return jsonify({"error": f"Invalid date format: {str(e)}"}), 400
+        return jsonify({"id": faction.id}), 201
     except Exception as e:
         db.session.rollback()
-        logger.error(f"Objective creation error: {str(e)}")
+        return jsonify({"error": str(e)}), 400
+
+@app.route("/api/protected-faction/<int:faction_id>", methods=["PUT"])
+@require_api_key
+def update_protected_faction(faction_id):
+    """Aktualisiert eine geschützte Faction."""
+    try:
+        data = request.get_json()
+        faction = ProtectedFaction.query.get(faction_id)
+        if not faction:
+            return jsonify({"error": "Not found"}), 404
+        faction.name = data.get("name", faction.name)
+        faction.webhook_url = data.get("webhook_url", faction.webhook_url)
+        faction.description = data.get("description", faction.description)
+        if "protected" in data:
+            faction.protected = bool(data["protected"])
+        db.session.commit()
+        return jsonify({"status": "updated"})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 400
+
+@app.route("/api/protected-faction/<int:faction_id>", methods=["DELETE"])
+@require_api_key
+def delete_protected_faction(faction_id):
+    """Löscht eine geschützte Faction."""
+    try:
+        faction = ProtectedFaction.query.get(faction_id)
+        if not faction:
+            return jsonify({"error": "Not found"}), 404
+        db.session.delete(faction)
+        db.session.commit()
+        return jsonify({"status": "deleted"})
+    except Exception as e:
+        db.session.rollback()
         return jsonify({"error": str(e)}), 400
 
 
-@app.route("/objectives", methods=["GET"])
+@app.route("/api/protected-faction/systems", methods=["GET"])
 @require_api_key
-def get_objectives():
-    try:
-        system_filter = request.args.get("system")
-        faction_filter = request.args.get("faction")
-        active_only = request.args.get("active", "false").lower() == "true"
-
-        query = Objective.query
-        if system_filter:
-            query = query.filter_by(system=system_filter)
-        if faction_filter:
-            query = query.filter_by(faction=faction_filter)
-        if active_only:
-            now = datetime.utcnow()
-            query = query.filter(
-                Objective.startdate <= now,
-                Objective.enddate >= now
-            )
-
-        objectives = query.all()
-
-        def serialize_objective(obj):
-            return {
-                "title": obj.title or "",
-                "priority": str(obj.priority) if obj.priority is not None else "0",
-                "startdate": obj.startdate.isoformat() + "Z" if obj.startdate else None,
-                "enddate": obj.enddate.isoformat() + "Z" if obj.enddate else None,
-                "type": obj.type or "",
-                "system": obj.system or "",
-                "faction": obj.faction or "",
-                "targets": [
-                    {
-                        "type": t.type or "",
-                        "station": t.station or "",
-                        "progress": t.progress or 0,
-                        "system": t.system or "",
-                        "faction": t.faction or "",
-                        "settlements": [
-                            {
-                                "name": s.name or "",
-                                "targetindividual": s.targetindividual or 0,
-                                "targetoverall": s.targetoverall or 0,
-                                "progress": s.progress or 0
-                            } for s in t.settlements
-                        ],
-                        "targetindividual": t.targetindividual or 0,
-                        "targetoverall": t.targetoverall or 0
-                    } for t in obj.targets
-                ],
-                "description": obj.description or ""
-            }
-
-        result = [serialize_objective(o) for o in objectives]
-        return jsonify(result)
-
-    except Exception as e:
-        logger.error(f"Get objectives error: {str(e)}")
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/objectives", methods=["GET"])
-@require_api_key
-def get_objectives_streamlit():
+def get_all_system_names():
     """
-    Streamlit-optimierte Version des Objectives-Endpunkts
-    Enthält IDs und ist für die UI-Darstellung optimiert
+    Gibt eine Liste aller Systemnamen aus der Tabelle eddn_system_info zurück.
+    Die Datenbank wird aus der .env-Variable EDDN_DATABASE gelesen.
     """
     try:
-        system_filter = request.args.get("system")
-        faction_filter = request.args.get("faction")
-        active_only = request.args.get("active", "false").lower() == "true"
+        eddn_db_uri = os.getenv("EDDN_DATABASE")
+        if not eddn_db_uri:
+            return jsonify({"error": "EDDN_DATABASE not configured in .env"}), 500
 
-        query = Objective.query
-        if system_filter:
-            query = query.filter_by(system=system_filter)
-        if faction_filter:
-            query = query.filter_by(faction=faction_filter)
-        if active_only:
-            now = datetime.utcnow()
-            query = query.filter(
-                Objective.startdate <= now,
-                Objective.enddate >= now
-            )
-
-        objectives = query.all()
-
-        def serialize_objective_streamlit(obj):
-            return {
-                "id": obj.id,
-                "title": obj.title or "",
-                "priority": str(obj.priority) if obj.priority is not None else "0",
-                "startdate": obj.startdate.isoformat() if obj.startdate else None,
-                "enddate": obj.enddate.isoformat() if obj.enddate else None,
-                "type": obj.type or "",
-                "system": obj.system or "",
-                "faction": obj.faction or "",
-                "targets": [
-                    {
-                        "id": t.id,
-                        "type": t.type or "",
-                        "station": t.station or "",
-                        "progress": t.progress or 0,
-                        "system": t.system or "",
-                        "faction": t.faction or "",
-                        "settlements": [
-                            {
-                                "id": s.id,
-                                "name": s.name or "",
-                                "targetindividual": s.targetindividual or 0,
-                                "targetoverall": s.targetoverall or 0,
-                                "progress": s.progress or 0
-                            } for s in t.settlements
-                        ],
-                        "targetindividual": t.targetindividual or 0,
-                        "targetoverall": t.targetoverall or 0
-                    } for t in obj.targets
-                ],
-                "description": obj.description or ""
-            }
-
-        result = [serialize_objective_streamlit(o) for o in objectives]
-        return jsonify(result)
-
+        engine = create_engine(eddn_db_uri)
+        with engine.connect() as conn:
+            rows = conn.execute(text("SELECT DISTINCT system_name FROM eddn_system_info ORDER BY system_name ASC")).fetchall()
+            system_names = [row[0] for row in rows if row[0]]
+        return jsonify(system_names)
     except Exception as e:
-        logger.error(f"Get objectives streamlit error: {str(e)}")
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/api/objectives/<int:objective_id>', methods=['DELETE'])
-@app.route('/objectives/<int:objective_id>', methods=['DELETE'])
-@require_api_key
-def delete_objective(objective_id):
-    """
-    Löscht ein Objective und alle zugehörigen Child-Datensätze.
-    """
-    from sqlalchemy.exc import SQLAlchemyError
-    try:
-        # Hole das Objective
-        objective = Objective.query.get(objective_id)
-        if not objective:
-            return jsonify({'error': 'Objective not found'}), 404
-
-        # Lösche zugehörige Child-Datensätze - verwende die korrekten Beziehungen
-        # Lösche zuerst die settlements der targets
-        for target in objective.targets:
-            for settlement in target.settlements:
-                db.session.delete(settlement)
-            db.session.delete(target)
-
-        # Lösche das Objective selbst
-        db.session.delete(objective)
-        db.session.commit()
-
-        logger.info(f"Objective {objective_id} and related data deleted successfully")
-        return jsonify({'message': f'Objective {objective_id} und zugehörige Daten gelöscht'}), 200
-
-    except SQLAlchemyError as e:
-        db.session.rollback()
-        logger.error(f"Database error deleting objective {objective_id}: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-    except Exception as e:
-        db.session.rollback()
-        logger.error(f"Error deleting objective {objective_id}: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route("/api/bounty-vouchers", methods=["GET"])
-@require_api_key
-def get_bounty_vouchers():
-    """
-    Gibt alle Bounty Vouchers mit den Spalten Cmdr, Squadron Rank, System, timestamp, tick-id, amount, type, faction zurück.
-    Unterstützt Filter über Query-Parameter: cmdr, system, tickid, type, faction, squadron_rank, period.
-    """
-    try:
-        # Filter-Parameter auslesen
-        cmdr = request.args.get("cmdr")
-        system = request.args.get("system")
-        tickid = request.args.get("tickid")
-        voucher_type = request.args.get("type", "bounty")
-        faction = request.args.get("faction")
-        squadron_rank = request.args.get("squadron_rank")
-        period = request.args.get("period", "all")
-
-        # Zeitraum-Filter
-        from datetime import datetime, timedelta
-        from dateutil.relativedelta import relativedelta
-        today = datetime.utcnow()
-        start = end = None
-        if period == "cw":
-            start = today - timedelta(days=today.weekday())
-            end = start + timedelta(days=6)
-        elif period == "lw":
-            end = today - timedelta(days=today.weekday() + 1)
-            start = end - timedelta(days=6)
-        elif period == "cm":
-            start = today.replace(day=1)
-            end = (start + relativedelta(months=1)) - timedelta(days=1)
-        elif period == "lm":
-            this_month_start = today.replace(day=1)
-            start = this_month_start - relativedelta(months=1)
-            end = this_month_start - timedelta(days=1)
-        elif period == "2m":
-            this_month_start = today.replace(day=1)
-            start = this_month_start - relativedelta(months=2)
-            end = this_month_start - timedelta(days=1)
-        elif period == "y":
-            start = today.replace(month=1, day=1)
-            end = today.replace(month=12, day=31)
-        elif period == "cd":
-            start = end = today
-        elif period == "ld":
-            start = end = today - timedelta(days=1)
-
-        where_clauses = ["rv.type = :voucher_type"]
-        params = {"voucher_type": voucher_type}
-
-        if cmdr:
-            where_clauses.append("e.cmdr = :cmdr")
-            params["cmdr"] = cmdr
-        if system:
-            where_clauses.append("e.starsystem = :system")
-            params["system"] = system
-        if tickid:
-            where_clauses.append("e.tickid = :tickid")
-            params["tickid"] = tickid
-        if faction:
-            where_clauses.append("rv.faction = :faction")
-            params["faction"] = faction
-        if squadron_rank:
-            where_clauses.append("c.squadron_rank = :squadron_rank")
-            params["squadron_rank"] = squadron_rank
-        if start and end:
-            where_clauses.append("e.timestamp BETWEEN :start AND :end")
-            params["start"] = start.strftime('%Y-%m-%dT00:00:00Z')
-            params["end"] = end.strftime('%Y-%m-%dT23:59:59Z')
-
-        where_sql = " AND ".join(where_clauses)
-
-        sql = f"""
-            SELECT
-                e.cmdr,
-                c.squadron_rank,
-                e.starsystem AS system,
-                e.timestamp,
-                e.tickid,
-                rv.amount,
-                rv.type,
-                rv.faction
-            FROM redeem_voucher_event rv
-            JOIN event e ON e.id = rv.event_id
-            LEFT JOIN cmdr c ON c.name = e.cmdr
-            WHERE {where_sql}
-            ORDER BY e.timestamp DESC
-        """
-
-        result = db.session.execute(text(sql), params).fetchall()
-        data = [dict(row._mapping) for row in result]
-        return jsonify(data)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/syntheticcz-summary", methods=["GET"])
-@require_api_key
-def syntheticcz_summary():
-    """
-    Gibt SyntheticCZ-Events gruppiert nach StarSystem, Faction, CZ-Type und Cmdr zurück, mit Zeitfilter.
-    """
-    try:
-        period = request.args.get("period", "all")
-        today = datetime.utcnow()
-        start = end = None
-
-        if period == "cw":
-            start = today - timedelta(days=today.weekday())
-            end = start + timedelta(days=6)
-        elif period == "lw":
-            end = today - timedelta(days=today.weekday() + 1)
-            start = end - timedelta(days=6)
-        elif period == "cm":
-            start = today.replace(day=1)
-            end = (start + relativedelta(months=1)) - timedelta(days=1)
-        elif period == "lm":
-            this_month_start = today.replace(day=1)
-            start = this_month_start - relativedelta(months=1)
-            end = this_month_start - timedelta(days=1)
-        elif period == "2m":
-            this_month_start = today.replace(day=1)
-            start = this_month_start - relativedelta(months=2)
-            end = this_month_start - timedelta(days=1)
-        elif period == "y":
-            start = today.replace(month=1, day=1)
-            end = today.replace(month=12, day=31)
-        elif period == "cd":
-            start = end = today
-        elif period == "ld":
-            start = end = today - timedelta(days=1)
-
-        if start and end:
-            date_filter = f"e.timestamp BETWEEN '{start.strftime('%Y-%m-%dT00:00:00Z')}' AND '{end.strftime('%Y-%m-%dT23:59:59Z')}'"
-        else:
-            date_filter = "1=1"
-
-        sql = f"""
-            SELECT
-                e.starsystem AS starsystem,
-                scz.faction,
-                scz.cz_type,
-                e.cmdr,
-                COUNT(*) AS cz_count
-            FROM synthetic_cz scz
-            JOIN event e ON e.id = scz.event_id
-            WHERE {date_filter}
-            GROUP BY e.starsystem, scz.faction, scz.cz_type, e.cmdr
-            ORDER BY cz_count DESC
-        """
-
-        result = db.session.execute(text(sql)).fetchall()
-        data = [dict(row._mapping) for row in result]
-        return jsonify(data)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/syntheticgroundcz-summary", methods=["GET"])
-@require_api_key
-def syntheticgroundcz_summary():
-    """
-    Gibt SyntheticGroundCZ-Events gruppiert nach StarSystem, Faction, Settlement, CZ-Type und Cmdr zurück, mit Zeitfilter.
-    """
-    try:
-        period = request.args.get("period", "all")
-        today = datetime.utcnow()
-        start = end = None
-
-        if period == "cw":
-            start = today - timedelta(days=today.weekday())
-            end = start + timedelta(days=6)
-        elif period == "lw":
-            end = today - timedelta(days=today.weekday() + 1)
-            start = end - timedelta(days=6)
-        elif period == "cm":
-            start = today.replace(day=1)
-            end = (start + relativedelta(months=1)) - timedelta(days=1)
-        elif period == "lm":
-            this_month_start = today.replace(day=1)
-            start = this_month_start - relativedelta(months=1)
-            end = this_month_start - timedelta(days=1)
-        elif period == "2m":
-            this_month_start = today.replace(day=1)
-            start = this_month_start - relativedelta(months=2)
-            end = this_month_start - timedelta(days=1)
-        elif period == "y":
-            start = today.replace(month=1, day=1)
-            end = today.replace(month=12, day=31)
-        elif period == "cd":
-            start = end = today
-        elif period == "ld":
-            start = end = today - timedelta(days=1)
-
-        if start and end:
-            date_filter = f"e.timestamp BETWEEN '{start.strftime('%Y-%m-%dT00:00:00Z')}' AND '{end.strftime('%Y-%m-%dT23:59:59Z')}'"
-        else:
-            date_filter = "1=1"
-
-        sql = f"""
-            SELECT
-                e.starsystem AS starsystem,
-                sgcz.faction,
-                sgcz.settlement,
-                sgcz.cz_type,
-                e.cmdr,
-                COUNT(*) AS cz_count
-            FROM synthetic_ground_cz sgcz
-            JOIN event e ON e.id = sgcz.event_id
-            WHERE {date_filter}
-            GROUP BY e.starsystem, sgcz.faction, sgcz.settlement, sgcz.cz_type, e.cmdr
-            ORDER BY cz_count DESC
-        """
-
-        result = db.session.execute(text(sql)).fetchall()
-        data = [dict(row._mapping) for row in result]
-        return jsonify(data)
-    except Exception as e:
+        logger.error(f"Fehler beim Abrufen der Systemnamen: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 
@@ -1789,6 +1519,7 @@ def initialize_all_tenant_databases():
     """
     Prüft beim Start für alle Tenants, ob die SQLite-DB-Datei existiert.
     Falls nicht, wird sie samt Tabellenstruktur angelegt.
+    Zusätzlich wird die Tabelle protected_faction angelegt, falls sie fehlt.
     """
     from sqlalchemy.engine import make_url
     from sqlalchemy import create_engine
@@ -1810,20 +1541,31 @@ def initialize_all_tenant_databases():
                 with engine.begin() as conn:
                     db.Model.metadata.create_all(bind=conn)
                 logger.info(f"Tenant-DB initialisiert: {abs_path}")
+        # Update existing Tenant DB
+        from update_db_tenant import ensure_protected_faction_table
+        ensure_protected_faction_table(db_uri)
 
 
 if __name__ == "__main__":
     print("Starting BGS Data API...")
     with app.app_context():
-        # Fallback-DB: Erstelle alle Tabellen, wenn sie nicht existieren
-        #db.create_all()
-        # Multi-Tenant: Prüfe und initialisiere alle Tenant-DBs
+        # Multi-Tenant: Prüfe und initialisiere alle Tenant-DBs und protected_faction-Tabellen
         initialize_all_tenant_databases()
         # Initialisiere den Tick-Wert
         get_latest_tickid()
 
+    # EDDN-Client als Subprozess starten
+    import multiprocessing
+    from eddn_client import main as eddn_main
+    print("Starting EDDN Client...")
+    eddn_process = multiprocessing.Process(target=eddn_main, daemon=True)
+    eddn_process.start()
+
+    # Shoutout Scheduler starten
     from fac_shoutout_scheduler import start_scheduler
     start_scheduler(app, db)
+
+    # Tick-Watch Scheduler starten
     from fdev_tick_monitor import start_tick_watch_scheduler, first_tick_check
     first_tick_check()
     start_tick_watch_scheduler()
@@ -1832,6 +1574,7 @@ if __name__ == "__main__":
     from fac_conflict_scheduler import start_fac_conflict_scheduler
     start_fac_conflict_scheduler(app, db)
 
+    # Inara Cmdr Sync Scheduler starten
     from cmdr_sync_inara import start_cmdr_sync_scheduler
     start_cmdr_sync_scheduler(app, db)
     app.run(host='0.0.0.0', port=5555, debug=False, use_reloader=False)

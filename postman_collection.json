@@ -441,6 +441,67 @@
               "path": ["api", "fsdjump-factions"]
             }
           }
+        },
+        {
+          "name": "System Summary",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/system-summary?faction=Federal%20Navy&controlling_faction=Federal%20Navy&controlling_power=Zemina%20Torval&power=Zemina%20Torval&state=Expansion&recovering_state=War&pending_state=Election&has_conflict=true",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "system-summary"],
+              "query": [
+                {
+                  "key": "faction",
+                  "value": "Federal Navy",
+                  "description": "Alle Systeme, in denen diese Faction präsent ist"
+                },
+                {
+                  "key": "controlling_faction",
+                  "value": "Federal Navy",
+                  "description": "Alle Systeme, die von dieser Faction kontrolliert werden"
+                },
+                {
+                  "key": "controlling_power",
+                  "value": "Zemina Torval",
+                  "description": "Alle Systeme, die von dieser Power kontrolliert werden"
+                },
+                {
+                  "key": "power",
+                  "value": "Zemina Torval",
+                  "description": "Alle Systeme, die von diesem Power beeinflusst werden"
+                },
+                {
+                  "key": "state",
+                  "value": "Expansion",
+                  "description": "Alle Systeme, in denen eine Faction mit diesem State (state oder active_states) präsent ist"
+                },
+                {
+                  "key": "recovering_state",
+                  "value": "War",
+                  "description": "Alle Systeme, in denen eine Faction mit diesem Recovering State präsent ist"
+                },
+                {
+                  "key": "pending_state",
+                  "value": "Election",
+                  "description": "Alle Systeme, in denen eine Faction mit diesem Pending State präsent ist"
+                },
+                {
+                  "key": "has_conflict",
+                  "value": "true",
+                  "description": "Alle Systeme mit mindestens einem Conflict"
+                }
+              ]
+            },
+            "description": "Systemübersicht. Optional können Filter als Query-Parameter gesetzt werden. Ohne Systemnamen und Filter werden alle Systeme (max. 100) gelistet."
+          }
         }
       ]
     },
@@ -1148,6 +1209,135 @@
               "raw": "{{baseUrl}}/discovery",
               "host": ["{{baseUrl}}"],
               "path": ["discovery"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Protected Factions",
+      "item": [
+        {
+          "name": "Get All Protected Factions",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/protected-faction",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "protected-faction"]
+            }
+          }
+        },
+        {
+          "name": "Get Protected Faction by ID",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/protected-faction/1",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "protected-faction", "1"]
+            }
+          }
+        },
+        {
+          "name": "Create Protected Faction",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Communism Interstellar\",\n  \"webhook_url\": \"DISCORD_BGS_WEBHOOK_PROD\",\n  \"description\": \"CIU\",\n  \"protected\": true\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/protected-faction",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "protected-faction"]
+            }
+          }
+        },
+        {
+          "name": "Update Protected Faction",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Communism Interstellar\",\n  \"webhook_url\": \"DISCORD_BGS_WEBHOOK_PROD\",\n  \"description\": \"CIU Updated\",\n  \"protected\": false\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/protected-faction/1",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "protected-faction", "1"]
+            }
+          }
+        },
+        {
+          "name": "Delete Protected Faction",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/protected-faction/1",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "protected-faction", "1"]
+            }
+          }
+        },
+        {
+          "name": "Get All System Names",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/protected-faction/systems",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "protected-faction", "systems"]
             }
           }
         }

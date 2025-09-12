@@ -198,3 +198,11 @@ class SyntheticCZ(db.Model):
     faction = db.Column(db.String(128))
     cmdr = db.Column(db.String(64))
     station_faction_name = db.Column(db.String(128))
+
+class ProtectedFaction(db.Model):
+    __tablename__ = "protected_faction"
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(128), unique=True, nullable=False)
+    webhook_url = db.Column(db.String(256))
+    description = db.Column(db.String(128))
+    protected = db.Column(db.Boolean, default=True)

@@ -6,13 +6,26 @@
 
 This project provides a RESTful API for receiving, storing, and processing Background Simulation (BGS) and Thargoid War activity data for the game Elite Dangerous. It is designed to integrate with BGS-Tally and other tools to support faction management and war tracking.
 
+---
+
+## Multi-Tenant Architecture
+
+This backend supports multiple tenants (factions, groups, or organizations), each with their own database, API key, and Discord webhooks. Tenant configuration is managed via `tenant.json`. All endpoints and background jobs are multi-tenant aware, ensuring data isolation and per-tenant notifications.
+
+---
+
 ## Features
 
 - Receive BGS and Thargoid War activity data via POST and PUT requests
-- Store incoming data in a database
-- Send notifications to Discord via webhooks
-- Scheduled shoutouts and tick monitoring
-- Conflict detection and reporting
+- Store incoming data in a tenant-specific database
+- Send notifications to Discord via tenant-specific webhooks
+- Scheduled shoutouts, tick monitoring, and conflict reporting per tenant
+- Commander synchronization with Inara API
+- EDDN data ingestion and system/faction info endpoints
+- Objectives and protected faction management
+- Multi-tenant authentication and API versioning
+
+---
 
 ## API Endpoints
 
@@ -96,6 +109,57 @@ The following API endpoints are available. Their specification is based on the d
 **Discovery & Health**
 
 - `GET /discovery`
+
+**EDDN System & Faction Data**
+
+- `GET /api/system-summary/` : Query system info, factions, conflicts, powerplay (with filters)
+- `GET /api/protected-faction` : List protected factions
+- `POST /api/protected-faction` : Create protected faction
+- `PUT /api/protected-faction/<id>` : Update protected faction
+- `DELETE /api/protected-faction/<id>` : Delete protected faction
+- `GET /api/protected-faction/systems` : List all system names
+
+**Conflict Reporting**
+
+- `GET /api/fac-in-conflict-current-tick` : Get current/previous tick conflicts for tenant's faction
+- `POST /api/discord/fac-in-conflict-current-tick` : Send conflict summary to Discord
+
+---
+
+## Background Services & Schedulers
+
+- **Tick Monitor**: Monitors the official BGS tick and notifies tenants via Discord
+- **Shoutout Scheduler**: Sends daily/periodic summaries to Discord
+- **Conflict Scheduler**: Triggers conflict reporting for each tenant
+- **Cmdr Sync Scheduler**: Syncs commander profiles from Inara
+- **EDDN Client**: Ingests real-time system/faction data from EDDN
+
+---
+
+## Configuration Files
+
+- `.env` : Global environment variables (API version, webhooks, DB URIs, etc.)
+- `tenant.json` : Per-tenant configuration (API keys, DB URIs, Discord webhooks, etc.)
+
+---
+
+## Documentation
+
+Extensive module documentation is available in the `docs/` folder:
+
+- `docs/app_module.md` : Main Flask app and API
+- `docs/models_module.md` : Main database models
+- `docs/models_eddn_module.md` : EDDN data models
+- `docs/eddn_client_module.md` : EDDN client
+- `docs/fdev_tick_monitor_module.md` : Tick monitor
+- `docs/fac_shoutout_scheduler_module.md` : Shoutout scheduler
+- `docs/fac_conflict_scheduler_module.md` : Conflict scheduler
+- `docs/fac_in_conflict_module.md` : Conflict API endpoints
+- `docs/cmdr_sync_inara_module.md` : Cmdr sync with Inara
+- `docs/tenant_json_module.md` : Tenant configuration
+- `docs/.env_module.md` : Environment configuration
+
+---
 
 ## Installation
 

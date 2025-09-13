@@ -454,7 +454,7 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/system-summary?faction=Federal%20Navy&controlling_faction=Federal%20Navy&controlling_power=Zemina%20Torval&power=Zemina%20Torval&state=Expansion&recovering_state=War&pending_state=Election&has_conflict=true",
+              "raw": "{{baseUrl}}/api/system-summary?faction=Federal%20Navy&controlling_faction=Federal%20Navy&controlling_power=Zemina%20Torval&power=Zemina%20Torval&state=Expansion&recovering_state=War&pending_state=Election&has_conflict=true&population=1000000-2000000&powerplay_state=Expansion",
               "host": ["{{baseUrl}}"],
               "path": ["api", "system-summary"],
               "query": [
@@ -497,6 +497,16 @@
                   "key": "has_conflict",
                   "value": "true",
                   "description": "Alle Systeme mit mindestens einem Conflict"
+                },
+                {
+                  "key": "population",
+                  "value": "1000000-2000000",
+                  "description": "Alle Systeme mit Population im Bereich (z.B. 1000000-2000000)"
+                },
+                {
+                  "key": "powerplay_state",
+                  "value": "Expansion",
+                  "description": "Alle Systeme mit diesem Powerplay-State (aus eddn_powerplay)"
                 }
               ]
             },

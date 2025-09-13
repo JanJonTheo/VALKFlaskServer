@@ -1236,6 +1236,8 @@ def system_summary(system_name):
     - recovering_state: alle Systeme, in denen eine Faction mit diesem Recovering State präsent ist
     - pending_state: alle Systeme, in denen eine Faction mit diesem Pending State präsent ist
     - has_conflict: true/1 → alle Systeme mit mindestens einem Conflict
+    - population: alle Systeme mit dieser Population (exakt oder Bereich, z.B. 1000000-2000000)
+    - powerplay_state: alle Systeme mit diesem Powerplay-State (aus eddn_powerplay)
     - system_name: expliziter Systemname (optional)
     """
     try:
@@ -1251,12 +1253,14 @@ def system_summary(system_name):
         power = params.get("power")
         state = params.get("state")
         recovering_state = params.get("recovering_state")
-        pending_state = params.get("pending_state")  # <--- NEU
+        pending_state = params.get("pending_state")
         has_conflict = params.get("has_conflict")
+        population = params.get("population")
+        powerplay_state = params.get("powerplay_state")
 
         with eddn_engine.connect() as conn:
             # Falls einer der Filter gesetzt ist oder kein Systemname angegeben ist, Systemliste liefern
-            if any([faction, controlling_faction, controlling_power, power, state, recovering_state, pending_state, has_conflict]) or not system_name:
+            if any([faction, controlling_faction, controlling_power, power, state, recovering_state, pending_state, has_conflict, population, powerplay_state]) or not system_name:
                 systems = None
 
                 # Faction-Präsenz
@@ -1338,6 +1342,40 @@ def system_summary(system_name):
                     ).fetchall()
                     conflict_systems = set(r[0] for r in rows)
                     systems = conflict_systems if systems is None else systems & conflict_systems
+
+                # Population (exakt oder Bereich)
+                if population:
+                    pop_systems = set()
+                    if "-" in population:
+                        try:
+                            pop_min, pop_max = map(int, population.split("-", 1))
+                            rows = conn.execute(
+                                text("SELECT DISTINCT system_name FROM eddn_system_info WHERE population >= :pop_min AND population <= :pop_max"),
+                                {"pop_min": pop_min, "pop_max": pop_max}
+                            ).fetchall()
+                            pop_systems = set(r[0] for r in rows)
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            pop_val = int(population)
+                            rows = conn.execute(
+                                text("SELECT DISTINCT system_name FROM eddn_system_info WHERE population = :pop_val"),
+                                {"pop_val": pop_val}
+                            ).fetchall()
+                            pop_systems = set(r[0] for r in rows)
+                        except Exception:
+                            pass
+                    systems = pop_systems if systems is None else systems & pop_systems
+
+                # Powerplay State (aus eddn_powerplay)
+                if powerplay_state:
+                    rows = conn.execute(
+                        text("SELECT DISTINCT system_name FROM eddn_powerplay WHERE powerplay_state = :pps COLLATE NOCASE"),
+                        {"pps": powerplay_state}
+                    ).fetchall()
+                    pps_systems = set(r[0] for r in rows)
+                    systems = pps_systems if systems is None else systems & pps_systems
 
                 # Wenn kein Filter gesetzt und kein Systemname: Alle Systeme
                 if systems is None:

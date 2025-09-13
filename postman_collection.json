@@ -454,63 +454,68 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/system-summary?faction=Federal%20Navy&controlling_faction=Federal%20Navy&controlling_power=Zemina%20Torval&power=Zemina%20Torval&state=Expansion&recovering_state=War&pending_state=Election&has_conflict=true&population=1000000-2000000&powerplay_state=Expansion",
+              "raw": "{{baseUrl}}/api/system-summary?faction=Federal%20Navy&controlling_faction=Federal%20Navy&controlling_power=Zemina%20Torval&power=Zemina%20Torval&state=Expansion&recovering_state=War&pending_state=Election&has_conflict=true&population=1000000-2000000&powerplay_state=Expansion&cf_in_conflict=true",
               "host": ["{{baseUrl}}"],
               "path": ["api", "system-summary"],
               "query": [
                 {
                   "key": "faction",
                   "value": "Federal Navy",
-                  "description": "Alle Systeme, in denen diese Faction präsent ist"
+                  "description": "All systems where this faction is present"
                 },
                 {
                   "key": "controlling_faction",
                   "value": "Federal Navy",
-                  "description": "Alle Systeme, die von dieser Faction kontrolliert werden"
+                  "description": "All systems controlled by this faction"
                 },
                 {
                   "key": "controlling_power",
                   "value": "Zemina Torval",
-                  "description": "Alle Systeme, die von dieser Power kontrolliert werden"
+                  "description": "All systems controlled by this power"
                 },
                 {
                   "key": "power",
                   "value": "Zemina Torval",
-                  "description": "Alle Systeme, die von diesem Power beeinflusst werden"
+                  "description": "All systems influenced by this power"
                 },
                 {
                   "key": "state",
                   "value": "Expansion",
-                  "description": "Alle Systeme, in denen eine Faction mit diesem State (state oder active_states) präsent ist"
+                  "description": "All systems where a faction with this state (state or active_states) is present"
                 },
                 {
                   "key": "recovering_state",
                   "value": "War",
-                  "description": "Alle Systeme, in denen eine Faction mit diesem Recovering State präsent ist"
+                  "description": "All systems where a faction with this recovering state is present"
                 },
                 {
                   "key": "pending_state",
                   "value": "Election",
-                  "description": "Alle Systeme, in denen eine Faction mit diesem Pending State präsent ist"
+                  "description": "All systems where a faction with this pending state is present"
                 },
                 {
                   "key": "has_conflict",
                   "value": "true",
-                  "description": "Alle Systeme mit mindestens einem Conflict"
+                  "description": "All systems with at least one conflict"
                 },
                 {
                   "key": "population",
                   "value": "1000000-2000000",
-                  "description": "Alle Systeme mit Population im Bereich (z.B. 1000000-2000000)"
+                  "description": "All systems with population in the given range (e.g. 1000000-2000000)"
                 },
                 {
                   "key": "powerplay_state",
                   "value": "Expansion",
-                  "description": "Alle Systeme mit diesem Powerplay-State (aus eddn_powerplay)"
+                  "description": "All systems with this powerplay state (from eddn_powerplay)"
+                },
+                {
+                  "key": "cf_in_conflict",
+                  "value": "true",
+                  "description": "All systems controlled by the specified controlling_faction and with a conflict"
                 }
               ]
             },
-            "description": "Systemübersicht. Optional können Filter als Query-Parameter gesetzt werden. Ohne Systemnamen und Filter werden alle Systeme (max. 100) gelistet."
+            "description": "System summary. Optionally, filters can be set as query parameters. Without system name and filters, all systems (max. 100) are listed."
           }
         }
       ]
@@ -1349,6 +1354,87 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "protected-faction", "systems"]
             }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Lists",
+      "item": [
+        {
+          "name": "Unique System Names",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/lists/systems",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "lists", "systems"]
+            },
+            "description": "Returns a list of unique system names from eddn_system_info."
+          }
+        },
+        {
+          "name": "Unique Controlling Factions",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/lists/controlling-factions",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "lists", "controlling-factions"]
+            },
+            "description": "Returns a list of unique controlling factions from eddn_system_info."
+          }
+        },
+        {
+          "name": "Unique Controlling Powers",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/lists/controlling-powers",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "lists", "controlling-powers"]
+            },
+            "description": "Returns a list of unique controlling powers from eddn_system_info."
+          }
+        },
+        {
+          "name": "Unique Factions",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/lists/factions",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "lists", "factions"]
+            },
+            "description": "Returns a list of unique factions from eddn_faction."
           }
         }
       ]

@@ -1226,19 +1226,20 @@ def leaderboard_summary():
 @require_api_key
 def system_summary(system_name):
     """
-    Gibt eine Systemzusammenfassung aus der in .env konfigurierten bgs_data_eddn zurück.
-    Optional können Query-Parameter genutzt werden:
-    - faction: alle Systeme, in denen diese Faction präsent ist
-    - controlling_faction: alle Systeme, die von dieser Faction kontrolliert werden
-    - controlling_power: alle Systeme, die von dieser Power kontrolliert werden
-    - power: alle Systeme, die von diesem Power beeinflusst werden
-    - state: alle Systeme, in denen eine Faction mit diesem State (state oder active_states) präsent ist
-    - recovering_state: alle Systeme, in denen eine Faction mit diesem Recovering State präsent ist
-    - pending_state: alle Systeme, in denen eine Faction mit diesem Pending State präsent ist
-    - has_conflict: true/1 → alle Systeme mit mindestens einem Conflict
-    - population: alle Systeme mit dieser Population (exakt oder Bereich, z.B. 1000000-2000000)
-    - powerplay_state: alle Systeme mit diesem Powerplay-State (aus eddn_powerplay)
-    - system_name: expliziter Systemname (optional)
+    Returns a system summary from the bgs_data_eddn configured in .env.
+    Optional query parameters:
+    - faction: all systems where this faction is present
+    - controlling_faction: all systems controlled by this faction
+    - controlling_power: all systems influenced by this power
+    - power: all systems influenced by this power
+    - state: all systems where a faction with this state (state or active_states) is present
+    - recovering_state: all systems where a faction with this recovering state is present
+    - pending_state: all systems where a faction with this pending state is present
+    - has_conflict: true/1 → all systems with at least one conflict
+    - population: all systems with this population (exact or range, e.g. 1000000-2000000)
+    - powerplay_state: all systems with this powerplay state (from eddn_powerplay)
+    - system_name: explicit system name (optional)
+    - cf_in_conflict: true/1 → all systems controlled by controlling_faction and with a conflict
     """
     try:
         eddn_db_uri = os.getenv("EDDN_DATABASE")
@@ -1257,10 +1258,11 @@ def system_summary(system_name):
         has_conflict = params.get("has_conflict")
         population = params.get("population")
         powerplay_state = params.get("powerplay_state")
+        cf_in_conflict = params.get("cf_in_conflict")
 
         with eddn_engine.connect() as conn:
-            # Falls einer der Filter gesetzt ist oder kein Systemname angegeben ist, Systemliste liefern
-            if any([faction, controlling_faction, controlling_power, power, state, recovering_state, pending_state, has_conflict, population, powerplay_state]) or not system_name:
+            # If any filter is set or no system name is given, return system list
+            if any([faction, controlling_faction, controlling_power, power, state, recovering_state, pending_state, has_conflict, population, powerplay_state, cf_in_conflict]) or not system_name:
                 systems = None
 
                 # Faction-Präsenz
@@ -1377,6 +1379,31 @@ def system_summary(system_name):
                     pps_systems = set(r[0] for r in rows)
                     systems = pps_systems if systems is None else systems & pps_systems
 
+                # CF in conflict
+                if cf_in_conflict and cf_in_conflict.lower() in ("1", "true", "yes"):
+                    # controlling_faction must be set
+                    if not controlling_faction:
+                        return jsonify({"error": "For cf_in_conflict, controlling_faction must be specified."}), 400
+                    # Hole Systeme, die von controlling_faction kontrolliert werden
+                    rows_cf = conn.execute(
+                        text("SELECT DISTINCT system_name FROM eddn_system_info WHERE controlling_faction = :cf COLLATE NOCASE"),
+                        {"cf": controlling_faction}
+                    ).fetchall()
+                    cf_systems = set(r[0] for r in rows_cf)
+                    # Hole Systeme mit Konflikt, bei denen die controlling_faction in faction1 oder faction2 vorkommt
+                    rows_conf = conn.execute(
+                        text("""
+                            SELECT DISTINCT system_name
+                            FROM eddn_conflict
+                            WHERE faction1 = :cf COLLATE NOCASE OR faction2 = :cf COLLATE NOCASE
+                        """),
+                        {"cf": controlling_faction}
+                    ).fetchall()
+                    conflict_systems = set(r[0] for r in rows_conf)
+                    # Schnittmenge
+                    cf_in_conflict_systems = cf_systems & conflict_systems
+                    systems = cf_in_conflict_systems if systems is None else systems & cf_in_conflict_systems
+
                 # Wenn kein Filter gesetzt und kein Systemname: Alle Systeme
                 if systems is None:
                     rows = conn.execute(
@@ -1387,7 +1414,7 @@ def system_summary(system_name):
                 # Wenn mehr als 100 Systeme gefunden wurden, Hinweis und keine Details laden
                 if len(systems) > 100:
                     return jsonify({
-                        "error": "Zu viele Systeme gefunden. Bitte schränken Sie die Filter weiter ein.",
+                        "error": "Too many systems found. Please narrow down your filters.",
                         "count": len(systems),
                         "systems": sorted(list(systems))[:100]
                     }), 400
@@ -1416,7 +1443,7 @@ def system_summary(system_name):
                     result.append(sys_result)
                 return jsonify(result)
 
-            # Standard: Einzelnes System
+            # Default: Single system
             sys_row = conn.execute(
                 text("SELECT * FROM eddn_system_info WHERE system_name = :name COLLATE NOCASE"),
                 {"name": system_name}
@@ -1458,6 +1485,7 @@ def get_protected_factions():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
 @app.route("/api/protected-faction/<int:faction_id>", methods=["GET"])
 @require_api_key
 def get_protected_faction(faction_id):
@@ -1475,6 +1503,7 @@ def get_protected_faction(faction_id):
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
 
 @app.route("/api/protected-faction", methods=["POST"])
 @require_api_key
@@ -1495,6 +1524,7 @@ def create_protected_faction():
         db.session.rollback()
         return jsonify({"error": str(e)}), 400
 
+
 @app.route("/api/protected-faction/<int:faction_id>", methods=["PUT"])
 @require_api_key
 def update_protected_faction(faction_id):
@@ -1514,6 +1544,7 @@ def update_protected_faction(faction_id):
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": str(e)}), 400
+
 
 @app.route("/api/protected-faction/<int:faction_id>", methods=["DELETE"])
 @require_api_key
@@ -1550,6 +1581,82 @@ def get_all_system_names():
         return jsonify(system_names)
     except Exception as e:
         logger.error(f"Fehler beim Abrufen der Systemnamen: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/lists/systems", methods=["GET"])
+@require_api_key
+def list_unique_system_names():
+    """
+    Returns a list of unique system names from eddn_system_info.
+    """
+    try:
+        eddn_db_uri = os.getenv("EDDN_DATABASE")
+        if not eddn_db_uri:
+            return jsonify({"error": "EDDN_DATABASE not configured in .env"}), 500
+        engine = create_engine(eddn_db_uri)
+        with engine.connect() as conn:
+            rows = conn.execute(text("SELECT DISTINCT system_name FROM eddn_system_info WHERE system_name IS NOT NULL ORDER BY system_name ASC")).fetchall()
+            system_names = [row[0] for row in rows if row[0]]
+        return jsonify(system_names)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/lists/controlling-factions", methods=["GET"])
+@require_api_key
+def list_unique_controlling_factions():
+    """
+    Returns a list of unique controlling factions from eddn_system_info.
+    """
+    try:
+        eddn_db_uri = os.getenv("EDDN_DATABASE")
+        if not eddn_db_uri:
+            return jsonify({"error": "EDDN_DATABASE not configured in .env"}), 500
+        engine = create_engine(eddn_db_uri)
+        with engine.connect() as conn:
+            rows = conn.execute(text("SELECT DISTINCT controlling_faction FROM eddn_system_info WHERE controlling_faction IS NOT NULL AND controlling_faction != '' ORDER BY controlling_faction ASC")).fetchall()
+            factions = [row[0] for row in rows if row[0]]
+        return jsonify(factions)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/lists/controlling-powers", methods=["GET"])
+@require_api_key
+def list_unique_controlling_powers():
+    """
+    Returns a list of unique controlling powers from eddn_system_info.
+    """
+    try:
+        eddn_db_uri = os.getenv("EDDN_DATABASE")
+        if not eddn_db_uri:
+            return jsonify({"error": "EDDN_DATABASE not configured in .env"}), 500
+        engine = create_engine(eddn_db_uri)
+        with engine.connect() as conn:
+            rows = conn.execute(text("SELECT DISTINCT controlling_power FROM eddn_system_info WHERE controlling_power IS NOT NULL AND controlling_power != '' ORDER BY controlling_power ASC")).fetchall()
+            powers = [row[0] for row in rows if row[0]]
+        return jsonify(powers)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/lists/factions", methods=["GET"])
+@require_api_key
+def list_unique_factions():
+    """
+    Returns a list of unique factions from eddn_faction.
+    """
+    try:
+        eddn_db_uri = os.getenv("EDDN_DATABASE")
+        if not eddn_db_uri:
+            return jsonify({"error": "EDDN_DATABASE not configured in .env"}), 500
+        engine = create_engine(eddn_db_uri)
+        with engine.connect() as conn:
+            rows = conn.execute(text("SELECT DISTINCT name FROM eddn_faction WHERE name IS NOT NULL AND name != '' ORDER BY name ASC")).fetchall()
+            factions = [row[0] for row in rows if row[0]]
+        return jsonify(factions)
+    except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 

@@ -2,7 +2,8 @@ from flask_sqlalchemy import SQLAlchemy
 from flask import Flask
 
 app = Flask(__name__)
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///bgs_data.db'
+# To be fixed, it has to load the correct DB path from tenant.json
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///db/bgs_data.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 

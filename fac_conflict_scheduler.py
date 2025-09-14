@@ -13,8 +13,9 @@ def start_fac_conflict_scheduler(app, db):
     # Lade alle Tenants aus tenant.json
     tenant_config_path = os.path.join(os.path.dirname(__file__), "tenant.json")
     with open(tenant_config_path, "r", encoding="utf-8") as f:
-        tenants = json.load(f)
-
+        tenant_data = json.load(f)
+        # Ensure TENANTS is always a list for consistent iteration
+        tenants = [tenant_data] if isinstance(tenant_data, dict) else tenant_data
     flask_server_url = os.getenv("FLASK_SERVER_URL_PROD")
 
     def make_post_conflict_to_discord(tenant):

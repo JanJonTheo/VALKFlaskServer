@@ -1,3 +1,4 @@
+
 services:
   flaskserver:
     build:
@@ -6,7 +7,7 @@ services:
     env_file:
       - .env
     ports:
-      - "5000:5000"
+      - "5000:5555"
     volumes:
       - .:/app
       - flask_db_data:/app/instance
@@ -21,7 +22,7 @@ services:
     env_file:
       - ../VALKStreamlitDashboard/.env
     environment:
-      - API_BASE=http://flaskserver:5000/api/
+      - API_BASE=http://flaskserver:5555/api/
     ports:
       - "8501:8501"
     volumes:

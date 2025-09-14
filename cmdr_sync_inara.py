@@ -20,8 +20,9 @@ INARA_API_KEY = os.getenv("INARA_API_KEY")
 # Tenant-Konfiguration laden
 TENANT_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "tenant.json")
 with open(TENANT_CONFIG_PATH, "r", encoding="utf-8") as f:
-    TENANTS = json.load(f)
-
+    tenant_data = json.load(f)
+    # Ensure TENANTS is always a list for consistent iteration
+    TENANTS = [tenant_data] if isinstance(tenant_data, dict) else tenant_data
 
 def fetch_inara_profile(cmdr_name, inara_api_key):
     payload = {

@@ -4,7 +4,8 @@ import sys
 import os
 
 # === KONFIGURATION ===
-DB_PATH = "instance/bgs_data.db"  # Pfad zur SQLite-Datenbank
+# To be fixed, it has to load the correct DB path from tenant.json
+DB_PATH = "db/bgs_data.db"  # Pfad zur SQLite-Datenbank
 USERNAME = "admin"       # Benutzername, dessen Passwort aktualisiert werden soll
 NEW_PASSWORD = "passAdmin"  # Neues Passwort im Klartext
 

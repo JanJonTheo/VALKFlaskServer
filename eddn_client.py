@@ -24,7 +24,9 @@ logger.addHandler(log_handler)
 logger.setLevel(logging.INFO)
 
 EDDN_URL = "tcp://eddn.edcd.io:9500"
-DB_URI = "sqlite:///db/bgs_data_eddn.db"
+
+# DB_URI from environment variable
+DB_URI = os.getenv("EDDN_DATABASE", "sqlite:///db/bgs_data_eddn.db")
 
 def cleanup_old_entries(session):
     """Löscht alle EDDNMessage-Einträge älter als 24h."""
@@ -32,6 +34,8 @@ def cleanup_old_entries(session):
     deleted = session.query(EDDNMessage).filter(EDDNMessage.timestamp < cutoff).delete()
     if deleted:
         logger.info(f"{deleted} alte eddn_message-Einträge gelöscht.")
+
+
 
 def save_system_related_data(session, data, eddn_message_id):
     msg = data.get("message", {})
@@ -116,8 +120,15 @@ def save_system_related_data(session, data, eddn_message_id):
         session.add(p)
 
 def main():
-    # DB-Session vorbereiten
-    engine = create_engine(DB_URI, connect_args={"check_same_thread": False})
+    # Ensure db directory exists
+    os.makedirs("db", exist_ok=True)
+    
+    # DB-Session with basic SQLite settings
+    engine = create_engine(
+        DB_URI, 
+        connect_args={"check_same_thread": False}
+    )
+    
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine)
     session = Session()

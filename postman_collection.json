@@ -114,7 +114,7 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/summary/market-events?period=cm",
+              "raw": "{{baseUrl}}/api/summary/market-events?period=cm&system_name=",
               "host": ["{{baseUrl}}"],
               "path": ["api", "summary", "market-events"],
               "query": [
@@ -122,6 +122,11 @@
                   "key": "period",
                   "value": "cm",
                   "description": "cw|lw|cm|lm|2m|y|cd|ld|all"
+                },
+                {
+                  "key": "system_name",
+                  "value": "",
+                  "description": "Optional: Filter nach System (StarSystem)"
                 }
               ]
             }
@@ -139,13 +144,18 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/summary/missions-completed?period=cm",
+              "raw": "{{baseUrl}}/api/summary/missions-completed?period=cm&system_name=",
               "host": ["{{baseUrl}}"],
               "path": ["api", "summary", "missions-completed"],
               "query": [
                 {
                   "key": "period",
                   "value": "cm"
+                },
+                {
+                  "key": "system_name",
+                  "value": "",
+                  "description": "Optional: Filter nach System (StarSystem)"
                 }
               ]
             }
@@ -163,13 +173,18 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/summary/missions-failed?period=cm",
+              "raw": "{{baseUrl}}/api/summary/missions-failed?period=cm&system_name=",
               "host": ["{{baseUrl}}"],
               "path": ["api", "summary", "missions-failed"],
               "query": [
                 {
                   "key": "period",
                   "value": "cm"
+                },
+                {
+                  "key": "system_name",
+                  "value": "",
+                  "description": "Optional: Filter nach System (StarSystem)"
                 }
               ]
             }
@@ -187,13 +202,18 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/summary/bounty-vouchers?period=cm",
+              "raw": "{{baseUrl}}/api/summary/bounty-vouchers?period=cm&system_name=",
               "host": ["{{baseUrl}}"],
               "path": ["api", "summary", "bounty-vouchers"],
               "query": [
                 {
                   "key": "period",
                   "value": "cm"
+                },
+                {
+                  "key": "system_name",
+                  "value": "",
+                  "description": "Optional: Filter nach System (StarSystem)"
                 }
               ]
             }
@@ -211,13 +231,18 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/summary/combat-bonds?period=cm",
+              "raw": "{{baseUrl}}/api/summary/combat-bonds?period=cm&system_name=",
               "host": ["{{baseUrl}}"],
               "path": ["api", "summary", "combat-bonds"],
               "query": [
                 {
                   "key": "period",
                   "value": "cm"
+                },
+                {
+                  "key": "system_name",
+                  "value": "",
+                  "description": "Optional: Filter nach System (StarSystem)"
                 }
               ]
             }
@@ -235,13 +260,18 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/summary/influence-by-faction?period=cm",
+              "raw": "{{baseUrl}}/api/summary/influence-by-faction?period=cm&system_name=",
               "host": ["{{baseUrl}}"],
               "path": ["api", "summary", "influence-by-faction"],
               "query": [
                 {
                   "key": "period",
                   "value": "cm"
+                },
+                {
+                  "key": "system_name",
+                  "value": "",
+                  "description": "Optional: Filter nach System (StarSystem)"
                 }
               ]
             }
@@ -259,13 +289,18 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/summary/influence-eic?period=cm",
+              "raw": "{{baseUrl}}/api/summary/influence-eic?period=cm&system_name=",
               "host": ["{{baseUrl}}"],
               "path": ["api", "summary", "influence-eic"],
               "query": [
                 {
                   "key": "period",
                   "value": "cm"
+                },
+                {
+                  "key": "system_name",
+                  "value": "",
+                  "description": "Optional: Filter nach System (StarSystem)"
                 }
               ]
             }
@@ -283,13 +318,18 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/summary/exploration-sales?period=cm",
+              "raw": "{{baseUrl}}/api/summary/exploration-sales?period=cm&system_name=",
               "host": ["{{baseUrl}}"],
               "path": ["api", "summary", "exploration-sales"],
               "query": [
                 {
                   "key": "period",
                   "value": "cm"
+                },
+                {
+                  "key": "system_name",
+                  "value": "",
+                  "description": "Optional: Filter nach System (StarSystem)"
                 }
               ]
             }
@@ -307,13 +347,18 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/summary/bounty-fines?period=cm",
+              "raw": "{{baseUrl}}/api/summary/bounty-fines?period=cm&system_name=",
               "host": ["{{baseUrl}}"],
               "path": ["api", "summary", "bounty-fines"],
               "query": [
                 {
                   "key": "period",
                   "value": "cm"
+                },
+                {
+                  "key": "system_name",
+                  "value": "",
+                  "description": "Optional: Filter nach System (StarSystem)"
                 }
               ]
             }

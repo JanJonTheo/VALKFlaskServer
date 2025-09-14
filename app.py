@@ -482,41 +482,74 @@ def summary_api(key):
     today = datetime.utcnow()
     start = end = None
 
-    if period == "cw":
-        start = today - timedelta(days=today.weekday())
-        end = start + timedelta(days=6)
-    elif period == "lw":
-        end = today - timedelta(days=today.weekday() + 1)
-        start = end - timedelta(days=6)
-    elif period == "cm":
-        start = today.replace(day=1)
-        end = (start + relativedelta(months=1)) - timedelta(days=1)
-    elif period == "lm":
-        this_month_start = today.replace(day=1)
-        start = this_month_start - relativedelta(months=1)
-        end = this_month_start - timedelta(days=1)
-    elif period == "2m":
-        this_month_start = today.replace(day=1)
-        start = this_month_start - relativedelta(months=2)
-        end = this_month_start - timedelta(days=1)
-    elif period == "y":
-        start = today.replace(month=1, day=1)
-        end = today.replace(month=12, day=31)
-    elif period == "cd":
-        start = end = today
-    elif period == "ld":
-        start = end = today - timedelta(days=1)
+    # --- Erweiterung für Tick-Filter ---
+    tick_filter = None
+    if period == "ct":
+        # Aktuelle tickid bestimmen
+        tickid_row = db.session.execute(text("SELECT tickid FROM event WHERE tickid IS NOT NULL ORDER BY timestamp DESC LIMIT 1")).fetchone()
+        if tickid_row and tickid_row[0]:
+            tick_filter = f"e.tickid = '{tickid_row[0]}'"
+        else:
+            tick_filter = "1=0"
+    elif period == "lt":
+        # Die beiden letzten unterschiedlichen tickids bestimmen
+        tickids = db.session.execute(text("SELECT DISTINCT tickid FROM event WHERE tickid IS NOT NULL ORDER BY timestamp DESC LIMIT 2")).fetchall()
+        if len(tickids) == 2:
+            current_tickid = tickids[0][0]
+            last_tickid = tickids[1][0]
+            tick_filter = f"e.tickid = '{last_tickid}'"
+        elif len(tickids) == 1:
+            tick_filter = f"e.tickid = '{tickids[0][0]}'"
+        else:
+            tick_filter = "1=0"
+    # --- Ende Tick-Filter ---
 
-    if start and end:
-        date_filter = f"e.timestamp BETWEEN '{start.strftime('%Y-%m-%dT00:00:00Z')}' AND '{end.strftime('%Y-%m-%dT23:59:59Z')}'"
+    if period in ("ct", "lt"):
+        date_filter = tick_filter
     else:
-        date_filter = "1=1"
+        # ...bestehende Zeiträume...
+        if period == "cw":
+            start = today - timedelta(days=today.weekday())
+            end = start + timedelta(days=6)
+        elif period == "lw":
+            end = today - timedelta(days=today.weekday() + 1)
+            start = end - timedelta(days=6)
+        elif period == "cm":
+            start = today.replace(day=1)
+            end = (start + relativedelta(months=1)) - timedelta(days=1)
+        elif period == "lm":
+            this_month_start = today.replace(day=1)
+            start = this_month_start - relativedelta(months=1)
+            end = this_month_start - timedelta(days=1)
+        elif period == "2m":
+            this_month_start = today.replace(day=1)
+            start = this_month_start - relativedelta(months=2)
+            end = this_month_start - timedelta(days=1)
+        elif period == "y":
+            start = today.replace(month=1, day=1)
+            end = today.replace(month=12, day=31)
+        elif period == "cd":
+            start = end = today
+        elif period == "ld":
+            start = end = today - timedelta(days=1)
+
+        if start and end:
+            date_filter = f"e.timestamp BETWEEN '{start.strftime('%Y-%m-%dT00:00:00Z')}' AND '{end.strftime('%Y-%m-%dT23:59:59Z')}'"
+        else:
+            date_filter = "1=1"
+
+    # system_name-Filter ergänzen
+    system_name = request.args.get("system_name")
+    if system_name:
+        date_filter = f"{date_filter} AND e.starsystem = :system_name"
 
     sql = sql_template.replace("{date_filter}", date_filter)
 
     params = {}
     if "faction_name LIKE :faction_name_like" in sql:
         params["faction_name_like"] = f"%{g.tenant['faction_name']}%"
+    if system_name:
+        params["system_name"] = system_name
 
     try:
         result = db.session.execute(text(sql), params).fetchall()
@@ -670,13 +703,79 @@ def summary_top5_api(key):
     if not sql_template:
         return jsonify({"error": "Unknown summary key"}), 404
 
+    # Zeitraum filtern (wie bei leaderboard)
     period = request.args.get("period", "all")
-    date_filter = get_date_filter(period)
+    today = datetime.utcnow()
+    start = end = None
+
+    # --- Erweiterung für Tick-Filter ---
+    tick_filter = None
+    if period == "ct":
+        # Aktuelle tickid bestimmen
+        tickid_row = db.session.execute(text("SELECT tickid FROM event WHERE tickid IS NOT NULL ORDER BY timestamp DESC LIMIT 1")).fetchone()
+        if tickid_row and tickid_row[0]:
+            tick_filter = f"e.tickid = '{tickid_row[0]}'"
+        else:
+            tick_filter = "1=0"
+    elif period == "lt":
+        # Die beiden letzten unterschiedlichen tickids bestimmen
+        tickids = db.session.execute(text("SELECT DISTINCT tickid FROM event WHERE tickid IS NOT NULL ORDER BY timestamp DESC LIMIT 2")).fetchall()
+        if len(tickids) == 2:
+            current_tickid = tickids[0][0]
+            last_tickid = tickids[1][0]
+            tick_filter = f"e.tickid = '{last_tickid}'"
+        elif len(tickids) == 1:
+            tick_filter = f"e.tickid = '{tickids[0][0]}'"
+        else:
+            tick_filter = "1=0"
+    # --- Ende Tick-Filter ---
+
+    if period in ("ct", "lt"):
+        date_filter = tick_filter
+    else:
+        # ...bestehende Zeiträume...
+        if period == "cw":
+            start = today - timedelta(days=today.weekday())
+            end = start + timedelta(days=6)
+        elif period == "lw":
+            end = today - timedelta(days=today.weekday() + 1)
+            start = end - timedelta(days=6)
+        elif period == "cm":
+            start = today.replace(day=1)
+            end = (start + relativedelta(months=1)) - timedelta(days=1)
+        elif period == "lm":
+            this_month_start = today.replace(day=1)
+            start = this_month_start - relativedelta(months=1)
+            end = this_month_start - timedelta(days=1)
+        elif period == "2m":
+            this_month_start = today.replace(day=1)
+            start = this_month_start - relativedelta(months=2)
+            end = this_month_start - timedelta(days=1)
+        elif period == "y":
+            start = today.replace(month=1, day=1)
+            end = today.replace(month=12, day=31)
+        elif period == "cd":
+            start = end = today
+        elif period == "ld":
+            start = end = today - timedelta(days=1)
+
+        if start and end:
+            date_filter = f"e.timestamp BETWEEN '{start.strftime('%Y-%m-%dT00:00:00Z')}' AND '{end.strftime('%Y-%m-%dT23:59:59Z')}'"
+        else:
+            date_filter = "1=1"
+
+    # system_name-Filter ergänzen
+    system_name = request.args.get("system_name")
+    if system_name:
+        date_filter = f"{date_filter} AND e.starsystem = :system_name"
+
     sql = sql_template.replace("{date_filter}", date_filter)
 
     params = {}
     if "faction_name LIKE :faction_name_like" in sql:
         params["faction_name_like"] = f"%{g.tenant['faction_name']}%"
+    if system_name:
+        params["system_name"] = system_name
 
     try:
         result = db.session.execute(text(sql), params).fetchall()
@@ -771,6 +870,7 @@ def fsdjump_factions():
 @app.route("/api/summary/discord/top5all", methods=["POST"])
 @require_api_key
 def send_all_top5_to_discord():
+
     base_queries = {
         "Market Events": {
             "sql": '''
@@ -1212,6 +1312,8 @@ def leaderboard_summary():
         params = {}
         if "faction_name LIKE :faction_name_like" in sql:
             params["faction_name_like"] = f"%{g.tenant['faction_name']}%"
+        if "system_name" in sql:
+            params["system_name"] = f"%{g.tenant['system_name']}%"
 
         result = db.session.execute(text(sql), params).fetchall()
         data = [dict(row._mapping) for row in result]

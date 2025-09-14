@@ -115,12 +115,23 @@ def save_system_related_data(session, data, eddn_message_id):
         )
         session.add(p)
 
+def defragment_database(engine):
+    """Defragmentiert die SQLite-Datenbank für optimale Performance."""
+    if "sqlite" in str(engine.url):
+        logger.info("SQLite-Datenbank starte Defragmentierung (VACUUM)...")
+        with engine.connect() as conn:
+            conn.exec_driver_sql("VACUUM")
+        logger.info("SQLite-Datenbank wurde defragmentiert (VACUUM ausgeführt).")
+
 def main():
     # DB-Session vorbereiten
     engine = create_engine(DB_URI, connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine)
     session = Session()
+
+    # Defragmentierung beim Start
+    defragment_database(engine)
 
     # ZMQ-Subscriber initialisieren
     context = zmq.Context()
@@ -131,6 +142,7 @@ def main():
     logger.info("EDDN Client gestartet, wartet auf Nachrichten...")
 
     last_cleanup = datetime.utcnow()
+    last_vacuum = datetime.utcnow()
 
     try:
         while True:
@@ -160,6 +172,11 @@ def main():
                 if (datetime.utcnow() - last_cleanup).total_seconds() > 600 or session.query(EDDNMessage).count() % 100 == 0:
                     cleanup_old_entries(session)
                     last_cleanup = datetime.utcnow()
+
+                # Defragmentiere die Datenbank alle 12 Stunden
+                if (datetime.utcnow() - last_vacuum).total_seconds() > 43200:
+                    defragment_database(engine)
+                    last_vacuum = datetime.utcnow()
             except Exception as ex:
                 logger.error(f"Fehler beim Verarbeiten/Speichern einer Nachricht: {ex}")
                 session.rollback()

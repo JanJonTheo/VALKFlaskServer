@@ -52,6 +52,10 @@
 
 ---
 
+## Postman Collection
+- Please refer to the provided Postman collection for testing and interacting with the API endpoints.
+
+---
 ## Notes on Multi-Tenant Architecture
 - Each request is assigned to a tenant based on the API key.
 - DB session and engine are set dynamically per request.

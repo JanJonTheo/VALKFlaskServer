@@ -114,14 +114,19 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/summary/market-events?period=cm",
+              "raw": "{{baseUrl}}/api/summary/market-events?period=cm&system_name=",
               "host": ["{{baseUrl}}"],
               "path": ["api", "summary", "market-events"],
               "query": [
                 {
                   "key": "period",
                   "value": "cm",
-                  "description": "cw|lw|cm|lm|2m|y|cd|ld|all"
+                  "description": "cw|lw|cm|lm|2m|y|cd|ld|ct|lt|all"
+                },
+                {
+                  "key": "system_name",
+                  "value": "",
+                  "description": "Optional: Filter nach System (StarSystem)"
                 }
               ]
             }
@@ -139,13 +144,19 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/summary/missions-completed?period=cm",
+              "raw": "{{baseUrl}}/api/summary/missions-completed?period=cm&system_name=",
               "host": ["{{baseUrl}}"],
               "path": ["api", "summary", "missions-completed"],
               "query": [
                 {
                   "key": "period",
-                  "value": "cm"
+                  "value": "cm",
+                  "description": "cw|lw|cm|lm|2m|y|cd|ld|ct|lt|all"
+                },
+                {
+                  "key": "system_name",
+                  "value": "",
+                  "description": "Optional: Filter nach System (StarSystem)"
                 }
               ]
             }
@@ -163,13 +174,19 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/summary/missions-failed?period=cm",
+              "raw": "{{baseUrl}}/api/summary/missions-failed?period=cm&system_name=",
               "host": ["{{baseUrl}}"],
               "path": ["api", "summary", "missions-failed"],
               "query": [
                 {
                   "key": "period",
-                  "value": "cm"
+                  "value": "cm",
+                  "description": "cw|lw|cm|lm|2m|y|cd|ld|ct|lt|all"
+                },
+                {
+                  "key": "system_name",
+                  "value": "",
+                  "description": "Optional: Filter nach System (StarSystem)"
                 }
               ]
             }
@@ -187,13 +204,19 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/summary/bounty-vouchers?period=cm",
+              "raw": "{{baseUrl}}/api/summary/bounty-vouchers?period=cm&system_name=",
               "host": ["{{baseUrl}}"],
               "path": ["api", "summary", "bounty-vouchers"],
               "query": [
                 {
                   "key": "period",
-                  "value": "cm"
+                  "value": "cm",
+                  "description": "cw|lw|cm|lm|2m|y|cd|ld|ct|lt|all"
+                },
+                {
+                  "key": "system_name",
+                  "value": "",
+                  "description": "Optional: Filter nach System (StarSystem)"
                 }
               ]
             }
@@ -211,13 +234,19 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/summary/combat-bonds?period=cm",
+              "raw": "{{baseUrl}}/api/summary/combat-bonds?period=cm&system_name=",
               "host": ["{{baseUrl}}"],
               "path": ["api", "summary", "combat-bonds"],
               "query": [
                 {
                   "key": "period",
-                  "value": "cm"
+                  "value": "cm",
+                  "description": "cw|lw|cm|lm|2m|y|cd|ld|ct|lt|all"
+                },
+                {
+                  "key": "system_name",
+                  "value": "",
+                  "description": "Optional: Filter nach System (StarSystem)"
                 }
               ]
             }
@@ -235,13 +264,19 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/summary/influence-by-faction?period=cm",
+              "raw": "{{baseUrl}}/api/summary/influence-by-faction?period=cm&system_name=",
               "host": ["{{baseUrl}}"],
               "path": ["api", "summary", "influence-by-faction"],
               "query": [
                 {
                   "key": "period",
-                  "value": "cm"
+                  "value": "cm",
+                  "description": "cw|lw|cm|lm|2m|y|cd|ld|ct|lt|all"
+                },
+                {
+                  "key": "system_name",
+                  "value": "",
+                  "description": "Optional: Filter nach System (StarSystem)"
                 }
               ]
             }
@@ -259,13 +294,19 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/summary/influence-eic?period=cm",
+              "raw": "{{baseUrl}}/api/summary/influence-eic?period=cm&system_name=",
               "host": ["{{baseUrl}}"],
               "path": ["api", "summary", "influence-eic"],
               "query": [
                 {
                   "key": "period",
-                  "value": "cm"
+                  "value": "cm",
+                  "description": "cw|lw|cm|lm|2m|y|cd|ld|ct|lt|all"
+                },
+                {
+                  "key": "system_name",
+                  "value": "",
+                  "description": "Optional: Filter nach System (StarSystem)"
                 }
               ]
             }
@@ -283,13 +324,19 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/summary/exploration-sales?period=cm",
+              "raw": "{{baseUrl}}/api/summary/exploration-sales?period=cm&system_name=",
               "host": ["{{baseUrl}}"],
               "path": ["api", "summary", "exploration-sales"],
               "query": [
                 {
                   "key": "period",
-                  "value": "cm"
+                  "value": "cm",
+                  "description": "cw|lw|cm|lm|2m|y|cd|ld|ct|lt|all"
+                },
+                {
+                  "key": "system_name",
+                  "value": "",
+                  "description": "Optional: Filter nach System (StarSystem)"
                 }
               ]
             }
@@ -307,13 +354,19 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/summary/bounty-fines?period=cm",
+              "raw": "{{baseUrl}}/api/summary/bounty-fines?period=cm&system_name=",
               "host": ["{{baseUrl}}"],
               "path": ["api", "summary", "bounty-fines"],
               "query": [
                 {
                   "key": "period",
-                  "value": "cm"
+                  "value": "cm",
+                  "description": "cw|lw|cm|lm|2m|y|cd|ld|ct|lt|all"
+                },
+                {
+                  "key": "system_name",
+                  "value": "",
+                  "description": "Optional: Filter nach System (StarSystem)"
                 }
               ]
             }
@@ -368,7 +421,7 @@
                 {
                   "key": "period",
                   "value": "cm",
-                  "description": "Zeitraum: cw|lw|cm|lm|2m|y|cd|ld|all"
+                  "description": "Zeitraum: cw|lw|cm|lm|2m|y|cd|ld|ct|lt|all"
                 }
               ]
             }
@@ -386,14 +439,19 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/syntheticcz-summary?period=cm",
+              "raw": "{{baseUrl}}/api/syntheticcz-summary?period=cm&system_name=",
               "host": ["{{baseUrl}}"],
               "path": ["api", "syntheticcz-summary"],
               "query": [
                 {
                   "key": "period",
                   "value": "cm",
-                  "description": "cw|lw|cm|lm|2m|y|cd|ld|all"
+                  "description": "cw|lw|cm|lm|2m|y|cd|ld|ct|lt|all"
+                },
+                {
+                  "key": "system_name",
+                  "value": "",
+                  "description": "Optional: Filter nach System (StarSystem)"
                 }
               ]
             }
@@ -411,14 +469,19 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/syntheticgroundcz-summary?period=cm",
+              "raw": "{{baseUrl}}/api/syntheticgroundcz-summary?period=cm&system_name=",
               "host": ["{{baseUrl}}"],
               "path": ["api", "syntheticgroundcz-summary"],
               "query": [
                 {
                   "key": "period",
                   "value": "cm",
-                  "description": "cw|lw|cm|lm|2m|y|cd|ld|all"
+                  "description": "cw|lw|cm|lm|2m|y|cd|ld|ct|lt|all"
+                },
+                {
+                  "key": "system_name",
+                  "value": "",
+                  "description": "Optional: Filter nach System (StarSystem)"
                 }
               ]
             }
@@ -535,13 +598,19 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/summary/top5/market-events?period=cm",
+              "raw": "{{baseUrl}}/api/summary/top5/market-events?period=cm&system_name=",
               "host": ["{{baseUrl}}"],
               "path": ["api", "summary", "top5", "market-events"],
               "query": [
                 {
                   "key": "period",
-                  "value": "cm"
+                  "value": "cm",
+                  "description": "cw|lw|cm|lm|2m|y|cd|ld|ct|lt|all"
+                },
+                {
+                  "key": "system_name",
+                  "value": "",
+                  "description": "Optional: Filter nach System (StarSystem)"
                 }
               ]
             }
@@ -559,13 +628,19 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/summary/top5/missions-completed?period=cm",
+              "raw": "{{baseUrl}}/api/summary/top5/missions-completed?period=cm&system_name=",
               "host": ["{{baseUrl}}"],
               "path": ["api", "summary", "top5", "missions-completed"],
               "query": [
                 {
                   "key": "period",
-                  "value": "cm"
+                  "value": "cm",
+                  "description": "cw|lw|cm|lm|2m|y|cd|ld|ct|lt|all"
+                },
+                {
+                  "key": "system_name",
+                  "value": "",
+                  "description": "Optional: Filter nach System (StarSystem)"
                 }
               ]
             }
@@ -583,13 +658,19 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/summary/top5/bounty-vouchers?period=cm",
+              "raw": "{{baseUrl}}/api/summary/top5/bounty-vouchers?period=cm&system_name=",
               "host": ["{{baseUrl}}"],
               "path": ["api", "summary", "top5", "bounty-vouchers"],
               "query": [
                 {
                   "key": "period",
-                  "value": "cm"
+                  "value": "cm",
+                  "description": "cw|lw|cm|lm|2m|y|cd|ld|ct|lt|all"
+                },
+                {
+                  "key": "system_name",
+                  "value": "",
+                  "description": "Optional: Filter nach System (StarSystem)"
                 }
               ]
             }
@@ -607,13 +688,19 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/summary/top5/combat-bonds?period=cm",
+              "raw": "{{baseUrl}}/api/summary/top5/combat-bonds?period=cm&system_name=",
               "host": ["{{baseUrl}}"],
               "path": ["api", "summary", "top5", "combat-bonds"],
               "query": [
                 {
                   "key": "period",
-                  "value": "cm"
+                  "value": "cm",
+                  "description": "cw|lw|cm|lm|2m|y|cd|ld|ct|lt|all"
+                },
+                {
+                  "key": "system_name",
+                  "value": "",
+                  "description": "Optional: Filter nach System (StarSystem)"
                 }
               ]
             }
@@ -631,13 +718,19 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/summary/top5/influence-eic?period=cm",
+              "raw": "{{baseUrl}}/api/summary/top5/influence-eic?period=cm&system_name=",
               "host": ["{{baseUrl}}"],
               "path": ["api", "summary", "top5", "influence-eic"],
               "query": [
                 {
                   "key": "period",
-                  "value": "cm"
+                  "value": "cm",
+                  "description": "cw|lw|cm|lm|2m|y|cd|ld|ct|lt|all"
+                },
+                {
+                  "key": "system_name",
+                  "value": "",
+                  "description": "Optional: Filter nach System (StarSystem)"
                 }
               ]
             }
@@ -655,13 +748,19 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/summary/top5/exploration-sales?period=cm",
+              "raw": "{{baseUrl}}/api/summary/top5/exploration-sales?period=cm&system_name=",
               "host": ["{{baseUrl}}"],
               "path": ["api", "summary", "top5", "exploration-sales"],
               "query": [
                 {
                   "key": "period",
-                  "value": "cm"
+                  "value": "cm",
+                  "description": "cw|lw|cm|lm|2m|y|cd|ld|ct|lt|all"
+                },
+                {
+                  "key": "system_name",
+                  "value": "",
+                  "description": "Optional: Filter nach System (StarSystem)"
                 }
               ]
             }
@@ -727,7 +826,7 @@
                 {
                   "key": "period",
                   "value": "cm",
-                  "description": "cw|lw|cm|lm|2m|y|cd|ld|all"
+                  "description": "cw|lw|cm|lm|2m|y|cd|ld|ct|lt|all"
                 }
               ]
             }
@@ -752,7 +851,7 @@
                 {
                   "key": "period",
                   "value": "cm",
-                  "description": "cw|lw|cm|lm|2m|y|cd|ld|all"
+                  "description": "cw|lw|cm|lm|2m|y|cd|ld|ct|lt|all"
                 }
               ]
             }
@@ -906,14 +1005,19 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/summary/leaderboard?period=cm",
+              "raw": "{{baseUrl}}/api/summary/leaderboard?period=cm&system_name=",
               "host": ["{{baseUrl}}"],
               "path": ["api", "summary", "leaderboard"],
               "query": [
                 {
                   "key": "period",
                   "value": "cm",
-                  "description": "cw|lw|cm|lm|2m|y|cd|ld|all"
+                  "description": "cw|lw|cm|lm|2m|y|cd|ld|ct|lt|all"
+                },
+                {
+                  "key": "system_name",
+                  "value": "",
+                  "description": "Optional: Filter nach System (StarSystem)"
                 }
               ]
             }

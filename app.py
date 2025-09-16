@@ -484,41 +484,74 @@ def summary_api(key):
     today = datetime.utcnow()
     start = end = None
 
-    if period == "cw":
-        start = today - timedelta(days=today.weekday())
-        end = start + timedelta(days=6)
-    elif period == "lw":
-        end = today - timedelta(days=today.weekday() + 1)
-        start = end - timedelta(days=6)
-    elif period == "cm":
-        start = today.replace(day=1)
-        end = (start + relativedelta(months=1)) - timedelta(days=1)
-    elif period == "lm":
-        this_month_start = today.replace(day=1)
-        start = this_month_start - relativedelta(months=1)
-        end = this_month_start - timedelta(days=1)
-    elif period == "2m":
-        this_month_start = today.replace(day=1)
-        start = this_month_start - relativedelta(months=2)
-        end = this_month_start - timedelta(days=1)
-    elif period == "y":
-        start = today.replace(month=1, day=1)
-        end = today.replace(month=12, day=31)
-    elif period == "cd":
-        start = end = today
-    elif period == "ld":
-        start = end = today - timedelta(days=1)
+    # --- Erweiterung für Tick-Filter ---
+    tick_filter = None
+    if period == "ct":
+        # Aktuelle tickid bestimmen
+        tickid_row = db.session.execute(text("SELECT tickid FROM event WHERE tickid IS NOT NULL ORDER BY timestamp DESC LIMIT 1")).fetchone()
+        if tickid_row and tickid_row[0]:
+            tick_filter = f"e.tickid = '{tickid_row[0]}'"
+        else:
+            tick_filter = "1=0"
+    elif period == "lt":
+        # Die beiden letzten unterschiedlichen tickids bestimmen
+        tickids = db.session.execute(text("SELECT DISTINCT tickid FROM event WHERE tickid IS NOT NULL ORDER BY timestamp DESC LIMIT 2")).fetchall()
+        if len(tickids) == 2:
+            current_tickid = tickids[0][0]
+            last_tickid = tickids[1][0]
+            tick_filter = f"e.tickid = '{last_tickid}'"
+        elif len(tickids) == 1:
+            tick_filter = f"e.tickid = '{tickids[0][0]}'"
+        else:
+            tick_filter = "1=0"
+    # --- Ende Tick-Filter ---
 
-    if start and end:
-        date_filter = f"e.timestamp BETWEEN '{start.strftime('%Y-%m-%dT00:00:00Z')}' AND '{end.strftime('%Y-%m-%dT23:59:59Z')}'"
+    if period in ("ct", "lt"):
+        date_filter = tick_filter
     else:
-        date_filter = "1=1"
+        # ...bestehende Zeiträume...
+        if period == "cw":
+            start = today - timedelta(days=today.weekday())
+            end = start + timedelta(days=6)
+        elif period == "lw":
+            end = today - timedelta(days=today.weekday() + 1)
+            start = end - timedelta(days=6)
+        elif period == "cm":
+            start = today.replace(day=1)
+            end = (start + relativedelta(months=1)) - timedelta(days=1)
+        elif period == "lm":
+            this_month_start = today.replace(day=1)
+            start = this_month_start - relativedelta(months=1)
+            end = this_month_start - timedelta(days=1)
+        elif period == "2m":
+            this_month_start = today.replace(day=1)
+            start = this_month_start - relativedelta(months=2)
+            end = this_month_start - timedelta(days=1)
+        elif period == "y":
+            start = today.replace(month=1, day=1)
+            end = today.replace(month=12, day=31)
+        elif period == "cd":
+            start = end = today
+        elif period == "ld":
+            start = end = today - timedelta(days=1)
+
+        if start and end:
+            date_filter = f"e.timestamp BETWEEN '{start.strftime('%Y-%m-%dT00:00:00Z')}' AND '{end.strftime('%Y-%m-%dT23:59:59Z')}'"
+        else:
+            date_filter = "1=1"
+
+    # system_name-Filter ergänzen
+    system_name = request.args.get("system_name")
+    if system_name:
+        date_filter = f"{date_filter} AND e.starsystem = :system_name"
 
     sql = sql_template.replace("{date_filter}", date_filter)
 
     params = {}
     if "faction_name LIKE :faction_name_like" in sql:
         params["faction_name_like"] = f"%{g.tenant['faction_name']}%"
+    if system_name:
+        params["system_name"] = system_name
 
     try:
         result = db.session.execute(text(sql), params).fetchall()
@@ -672,13 +705,79 @@ def summary_top5_api(key):
     if not sql_template:
         return jsonify({"error": "Unknown summary key"}), 404
 
+    # Zeitraum filtern (wie bei leaderboard)
     period = request.args.get("period", "all")
-    date_filter = get_date_filter(period)
+    today = datetime.utcnow()
+    start = end = None
+
+    # --- Erweiterung für Tick-Filter ---
+    tick_filter = None
+    if period == "ct":
+        # Aktuelle tickid bestimmen
+        tickid_row = db.session.execute(text("SELECT tickid FROM event WHERE tickid IS NOT NULL ORDER BY timestamp DESC LIMIT 1")).fetchone()
+        if tickid_row and tickid_row[0]:
+            tick_filter = f"e.tickid = '{tickid_row[0]}'"
+        else:
+            tick_filter = "1=0"
+    elif period == "lt":
+        # Die beiden letzten unterschiedlichen tickids bestimmen
+        tickids = db.session.execute(text("SELECT DISTINCT tickid FROM event WHERE tickid IS NOT NULL ORDER BY timestamp DESC LIMIT 2")).fetchall()
+        if len(tickids) == 2:
+            current_tickid = tickids[0][0]
+            last_tickid = tickids[1][0]
+            tick_filter = f"e.tickid = '{last_tickid}'"
+        elif len(tickids) == 1:
+            tick_filter = f"e.tickid = '{tickids[0][0]}'"
+        else:
+            tick_filter = "1=0"
+    # --- Ende Tick-Filter ---
+
+    if period in ("ct", "lt"):
+        date_filter = tick_filter
+    else:
+        # ...bestehende Zeiträume...
+        if period == "cw":
+            start = today - timedelta(days=today.weekday())
+            end = start + timedelta(days=6)
+        elif period == "lw":
+            end = today - timedelta(days=today.weekday() + 1)
+            start = end - timedelta(days=6)
+        elif period == "cm":
+            start = today.replace(day=1)
+            end = (start + relativedelta(months=1)) - timedelta(days=1)
+        elif period == "lm":
+            this_month_start = today.replace(day=1)
+            start = this_month_start - relativedelta(months=1)
+            end = this_month_start - timedelta(days=1)
+        elif period == "2m":
+            this_month_start = today.replace(day=1)
+            start = this_month_start - relativedelta(months=2)
+            end = this_month_start - timedelta(days=1)
+        elif period == "y":
+            start = today.replace(month=1, day=1)
+            end = today.replace(month=12, day=31)
+        elif period == "cd":
+            start = end = today
+        elif period == "ld":
+            start = end = today - timedelta(days=1)
+
+        if start and end:
+            date_filter = f"e.timestamp BETWEEN '{start.strftime('%Y-%m-%dT00:00:00Z')}' AND '{end.strftime('%Y-%m-%dT23:59:59Z')}'"
+        else:
+            date_filter = "1=1"
+
+    # system_name-Filter ergänzen
+    system_name = request.args.get("system_name")
+    if system_name:
+        date_filter = f"{date_filter} AND e.starsystem = :system_name"
+
     sql = sql_template.replace("{date_filter}", date_filter)
 
     params = {}
     if "faction_name LIKE :faction_name_like" in sql:
         params["faction_name_like"] = f"%{g.tenant['faction_name']}%"
+    if system_name:
+        params["system_name"] = system_name
 
     try:
         result = db.session.execute(text(sql), params).fetchall()
@@ -773,6 +872,7 @@ def fsdjump_factions():
 @app.route("/api/summary/discord/top5all", methods=["POST"])
 @require_api_key
 def send_all_top5_to_discord():
+
     base_queries = {
         "Market Events": {
             "sql": '''
@@ -1080,39 +1180,79 @@ def leaderboard_summary():
     try:
         period = request.args.get("period", "all")
         today = datetime.utcnow()
-        start = end = None
 
-        if period == "cw":  # current week
-            start = today - timedelta(days=today.weekday())
-            end = start + timedelta(days=6)
-        elif period == "lw":  # last week
-            end = today - timedelta(days=today.weekday() + 1)
-            start = end - timedelta(days=6)
-        elif period == "cm":  # current month
-            start = today.replace(day=1)
-            end = (start + relativedelta(months=1)) - timedelta(days=1)
-        elif period == "lm":  # last month
-            this_month_start = today.replace(day=1)
-            start = this_month_start - relativedelta(months=1)
-            end = this_month_start - timedelta(days=1)
-        elif period == "2m":  # last two full months
-            this_month_start = today.replace(day=1)
-            start = this_month_start - relativedelta(months=2)
-            end = this_month_start - timedelta(days=1)
-        elif period == "y":  # year-to-date
-            start = today.replace(month=1, day=1)
-            end = today.replace(month=12, day=31)
-        elif period == "cd":  # current day (today)
-            start = end = today
-        elif period == "ld":  # last day (yesterday)
-            start = end = today - timedelta(days=1)
+        # Einheitliche Filter-Strings + Parameter-Container
+        date_filter = "1=1"
+        date_filter_sub = "1=1"
+        params = {}
 
-        if start and end:
-            date_filter = f"e.timestamp BETWEEN '{start.strftime('%Y-%m-%dT00:00:00Z')}' AND '{end.strftime('%Y-%m-%dT23:59:59Z')}'"
-            date_filter_sub = f"ex.timestamp BETWEEN '{start.strftime('%Y-%m-%dT00:00:00Z')}' AND '{end.strftime('%Y-%m-%dT23:59:59Z')}'"
+        # --- Tick-basierte Perioden (ct = current tick, lt = last tick) ---
+        if period in ("ct", "lt"):
+            if period == "ct":
+                row = db.session.execute(
+                    text("SELECT tickid FROM event WHERE tickid IS NOT NULL ORDER BY timestamp DESC LIMIT 1")
+                ).fetchone()
+                if row and row[0]:
+                    params["tickid"] = row[0]
+                    date_filter = "e.tickid = :tickid"
+                    date_filter_sub = "ex.tickid = :tickid"
+                else:
+                    date_filter = date_filter_sub = "1=0"
+            else:  # lt
+                rows = db.session.execute(
+                    text("SELECT DISTINCT tickid FROM event WHERE tickid IS NOT NULL ORDER BY timestamp DESC LIMIT 2")
+                ).fetchall()
+                if rows:
+                    last_tickid = rows[1][0] if len(rows) == 2 else rows[0][0]
+                    params["tickid"] = last_tickid
+                    date_filter = "e.tickid = :tickid"
+                    date_filter_sub = "ex.tickid = :tickid"
+                else:
+                    date_filter = date_filter_sub = "1=0"
+
+        # --- Zeitbasierte Perioden ---
         else:
-            date_filter = "1=1"
-            date_filter_sub = "1=1"
+            start = end = None
+            if period == "cw":  # current week
+                start = today - timedelta(days=today.weekday())
+                end = start + timedelta(days=6)
+            elif period == "lw":  # last week
+                end = today - timedelta(days=today.weekday() + 1)
+                start = end - timedelta(days=6)
+            elif period == "cm":  # current month
+                start = today.replace(day=1)
+                end = (start + relativedelta(months=1)) - timedelta(days=1)
+            elif period == "lm":  # last month
+                this_month_start = today.replace(day=1)
+                start = this_month_start - relativedelta(months=1)
+                end = this_month_start - timedelta(days=1)
+            elif period == "2m":  # last two full months
+                this_month_start = today.replace(day=1)
+                start = this_month_start - relativedelta(months=2)
+                end = this_month_start - timedelta(days=1)
+            elif period == "y":  # year-to-date
+                start = today.replace(month=1, day=1)
+                end = today.replace(month=12, day=31)
+            elif period == "cd":  # current day
+                start = end = today
+            elif period == "ld":  # last day
+                start = end = today - timedelta(days=1)
+
+            if start and end:
+                date_from = start.strftime('%Y-%m-%dT00:00:00Z')
+                date_to = end.strftime('%Y-%m-%dT23:59:59Z')
+                date_filter = f"e.timestamp BETWEEN '{date_from}' AND '{date_to}'"
+                date_filter_sub = f"ex.timestamp BETWEEN '{date_from}' AND '{date_to}'"
+            else:
+                date_filter = "1=1"
+                date_filter_sub = "1=1"
+
+        # --- Optionaler System-Filter ---
+        system_name = request.args.get("system_name")
+        if system_name:
+            date_filter += " AND e.starsystem = :system_name"
+            date_filter_sub += " AND ex.starsystem = :system_name"
+            params["system_name"] = system_name  # <- aus Request, nicht aus Tenant! :contentReference[oaicite:2]{index=2}
 
         sql = f"""
             SELECT e.cmdr,
@@ -1211,14 +1351,563 @@ def leaderboard_summary():
             ORDER BY e.cmdr
         """
 
-        params = {}
-        if "faction_name LIKE :faction_name_like" in sql:
-            params["faction_name_like"] = f"%{g.tenant['faction_name']}%"
+        # LIKE-Parameter für EIC-Influence
+        params["faction_name_like"] = f"%{g.tenant['faction_name']}%"
 
         result = db.session.execute(text(sql), params).fetchall()
         data = [dict(row._mapping) for row in result]
         return jsonify(data)
 
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/summary/recruits", methods=["GET"])
+@require_api_key
+def summary_recruits():
+    try:
+        sql = """
+              SELECT e.cmdr                                                      AS commander, \
+                     CASE WHEN COUNT(e.id) > 0 THEN 'Yes' ELSE 'No' END          AS has_data, \
+                     MAX(e.timestamp)                                            AS last_active, \
+                     CAST(julianday('now') - julianday(MIN(e.timestamp)) AS INT) AS days_since_join, \
+                     (SELECT COALESCE(SUM(mb.count), 0) + COALESCE((SELECT SUM(ms.count)
+                                                                    FROM market_sell_event ms
+                                                                             JOIN event e2 ON e2.id = ms.event_id
+                                                                    WHERE e2.cmdr = e.cmdr), 0)
+                      FROM market_buy_event mb
+                               JOIN event e1 ON e1.id = mb.event_id
+                      WHERE e1.cmdr = e.cmdr)                                    AS tonnage, \
+                     (SELECT COUNT(*)
+                      FROM mission_completed_event mc
+                               JOIN event ev ON ev.id = mc.event_id
+                      WHERE ev.cmdr = e.cmdr)                                    AS mission_count, \
+                     (SELECT SUM(rv.amount)
+                      FROM redeem_voucher_event rv
+                               JOIN event ev ON ev.id = rv.event_id
+                      WHERE ev.cmdr = e.cmdr \
+                        AND rv.type = 'bounty')                                  AS bounty_claims, \
+                     (SELECT SUM(total)
+                      FROM (SELECT se.earnings AS total \
+                            FROM sell_exploration_data_event se \
+                                     JOIN event ev ON ev.id = se.event_id \
+                            WHERE ev.cmdr = e.cmdr \
+                            UNION ALL \
+                            SELECT me.total_earnings AS total \
+                            FROM multi_sell_exploration_data_event me \
+                                     JOIN event ev ON ev.id = me.event_id \
+                            WHERE ev.cmdr = e.cmdr))                             AS exp_value, \
+                     (SELECT SUM(rv.amount)
+                      FROM redeem_voucher_event rv
+                               JOIN event ev ON ev.id = rv.event_id
+                      WHERE ev.cmdr = e.cmdr \
+                        AND rv.type = 'CombatBond')                              AS combat_bonds, \
+                     (SELECT SUM(cc.bounty)
+                      FROM commit_crime_event cc
+                               JOIN event ev ON ev.id = cc.event_id
+                      WHERE ev.cmdr = e.cmdr)                                    AS bounty_fines
+              FROM event e
+                       JOIN cmdr c ON c.name = e.cmdr
+              WHERE e.cmdr IS NOT NULL \
+                AND c.squadron_rank = 'Recruit'
+              GROUP BY e.cmdr
+              ORDER BY days_since_join ASC \
+              """
+        result = db.session.execute(text(sql)).fetchall()
+        data = [dict(row._mapping) for row in result]
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/discovery", methods=["GET"])
+def discovery():
+    """Discovery endpoint providing server capabilities and information"""
+    try:
+        discovery_response = {
+            "name": os.getenv("SERVER_NAME_PROD"),
+            "description": os.getenv("SERVER_DESCRIPTION_PROD"),
+            "url": os.getenv("SERVER_URL_PROD"),
+            "endpoints": {
+                "events": {
+                    "path": "/events",
+                    "minPeriod": "10",
+                    "maxBatch": "100"
+                },
+                "activities": {
+                    "path": "/activities",
+                    "minPeriod": "60",
+                    "maxBatch": "10"
+                },
+                "objectives": {
+                    "path": "/objectives",
+                    "minPeriod": "30",
+                    "maxBatch": "20"
+                }
+            },
+            "headers": {
+                "apikey": {
+                    "required": True,
+                    "description": "API key for authentication"
+                },
+                "apiversion": {
+                    "required": True,
+                    "description": "The version of the API in x.y.z notation",
+                    "current": API_VERSION
+                }
+            }
+        }
+
+        return jsonify(discovery_response), 200
+
+    except Exception as e:
+        logger.error(f"Discovery endpoint error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/", methods=["GET"])
+def root():
+    """Root endpoint providing basic server information"""
+    try:
+        return jsonify({
+            "message": "VALK Flask Server is running",
+            "version": os.getenv("API_VERSION_PROD", "1.6.0"),
+            "name": os.getenv("SERVER_NAME_PROD", "VALK Flask Server"),
+            "endpoints": {
+                "discovery": "/discovery",
+                "api": "/api/"
+            }
+        }), 200
+    except Exception as e:
+        logger.error(f"Root endpoint error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/objectives", methods=["POST"])
+@app.route("/objectives", methods=["POST"])
+@require_api_key
+def create_objective():
+    try:
+        data = request.get_json()
+
+        # Validierung der Pflichtfelder
+        if not data.get("title"):
+            return jsonify({"error": "Title is required"}), 400
+
+        objective = Objective(
+            title=data.get("title"),
+            priority=data.get("priority"),
+            type=data.get("type"),
+            system=data.get("system"),
+            faction=data.get("faction"),
+            description=data.get("description"),
+            startdate=datetime.fromisoformat(data["startdate"]) if data.get("startdate") else None,
+            enddate=datetime.fromisoformat(data["enddate"]) if data.get("enddate") else None
+        )
+
+        for target_data in data.get("targets", []):
+            target = ObjectiveTarget(
+                type=target_data.get("type"),
+                station=target_data.get("station"),
+                system=target_data.get("system"),
+                faction=target_data.get("faction"),
+                progress=target_data.get("progress", 0),
+                targetindividual=target_data.get("targetindividual"),
+                targetoverall=target_data.get("targetoverall")
+            )
+
+            for s in target_data.get("settlements", []):
+                settlement = ObjectiveTargetSettlement(
+                    name=s.get("name"),
+                    targetindividual=s.get("targetindividual"),
+                    targetoverall=s.get("targetoverall"),
+                    progress=s.get("progress", 0)
+                )
+                target.settlements.append(settlement)
+
+            objective.targets.append(target)
+
+        db.session.add(objective)
+        db.session.commit()
+
+        return jsonify({
+            "status": "Objective created successfully",
+            "id": objective.id
+        }), 201
+
+    except ValueError as e:
+        db.session.rollback()
+        return jsonify({"error": f"Invalid date format: {str(e)}"}), 400
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Objective creation error: {str(e)}")
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/objectives", methods=["GET"])
+@require_api_key
+def get_objectives():
+    try:
+        system_filter = request.args.get("system")
+        faction_filter = request.args.get("faction")
+        active_only = request.args.get("active", "false").lower() == "true"
+
+        query = Objective.query
+        if system_filter:
+            query = query.filter_by(system=system_filter)
+        if faction_filter:
+            query = query.filter_by(faction=faction_filter)
+        if active_only:
+            now = datetime.utcnow()
+            query = query.filter(
+                Objective.startdate <= now,
+                Objective.enddate >= now
+            )
+
+        objectives = query.all()
+
+        def serialize_objective(obj):
+            return {
+                "title": obj.title or "",
+                "priority": str(obj.priority) if obj.priority is not None else "0",
+                "startdate": obj.startdate.isoformat() + "Z" if obj.startdate else None,
+                "enddate": obj.enddate.isoformat() + "Z" if obj.enddate else None,
+                "type": obj.type or "",
+                "system": obj.system or "",
+                "faction": obj.faction or "",
+                "targets": [
+                    {
+                        "type": t.type or "",
+                        "station": t.station or "",
+                        "progress": t.progress or 0,
+                        "system": t.system or "",
+                        "faction": t.faction or "",
+                        "settlements": [
+                            {
+                                "name": s.name or "",
+                                "targetindividual": s.targetindividual or 0,
+                                "targetoverall": s.targetoverall or 0,
+                                "progress": s.progress or 0
+                            } for s in t.settlements
+                        ],
+                        "targetindividual": t.targetindividual or 0,
+                        "targetoverall": t.targetoverall or 0
+                    } for t in obj.targets
+                ],
+                "description": obj.description or ""
+            }
+
+        result = [serialize_objective(o) for o in objectives]
+        return jsonify(result)
+
+    except Exception as e:
+        logger.error(f"Get objectives error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/objectives", methods=["GET"])
+@require_api_key
+def get_objectives_streamlit():
+    """
+    Streamlit-optimierte Version des Objectives-Endpunkts
+    Enthält IDs und ist für die UI-Darstellung optimiert
+    """
+    try:
+        system_filter = request.args.get("system")
+        faction_filter = request.args.get("faction")
+        active_only = request.args.get("active", "false").lower() == "true"
+
+        query = Objective.query
+        if system_filter:
+            query = query.filter_by(system=system_filter)
+        if faction_filter:
+            query = query.filter_by(faction=faction_filter)
+        if active_only:
+            now = datetime.utcnow()
+            query = query.filter(
+                Objective.startdate <= now,
+                Objective.enddate >= now
+            )
+
+        objectives = query.all()
+
+        def serialize_objective_streamlit(obj):
+            return {
+                "id": obj.id,
+                "title": obj.title or "",
+                "priority": str(obj.priority) if obj.priority is not None else "0",
+                "startdate": obj.startdate.isoformat() if obj.startdate else None,
+                "enddate": obj.enddate.isoformat() if obj.enddate else None,
+                "type": obj.type or "",
+                "system": obj.system or "",
+                "faction": obj.faction or "",
+                "targets": [
+                    {
+                        "id": t.id,
+                        "type": t.type or "",
+                        "station": t.station or "",
+                        "progress": t.progress or 0,
+                        "system": t.system or "",
+                        "faction": t.faction or "",
+                        "settlements": [
+                            {
+                                "id": s.id,
+                                "name": s.name or "",
+                                "targetindividual": s.targetindividual or 0,
+                                "targetoverall": s.targetoverall or 0,
+                                "progress": s.progress or 0
+                            } for s in t.settlements
+                        ],
+                        "targetindividual": t.targetindividual or 0,
+                        "targetoverall": t.targetoverall or 0
+                    } for t in obj.targets
+                ],
+                "description": obj.description or ""
+            }
+
+        result = [serialize_objective_streamlit(o) for o in objectives]
+        return jsonify(result)
+
+    except Exception as e:
+        logger.error(f"Get objectives streamlit error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/objectives/<int:objective_id>', methods=['DELETE'])
+@app.route('/objectives/<int:objective_id>', methods=['DELETE'])
+@require_api_key
+def delete_objective(objective_id):
+    """
+    Löscht ein Objective und alle zugehörigen Child-Datensätze.
+    """
+    from sqlalchemy.exc import SQLAlchemyError
+    try:
+        # Hole das Objective
+        objective = Objective.query.get(objective_id)
+        if not objective:
+            return jsonify({'error': 'Objective not found'}), 404
+
+        # Lösche zugehörige Child-Datensätze - verwende die korrekten Beziehungen
+        # Lösche zuerst die settlements der targets
+        for target in objective.targets:
+            for settlement in target.settlements:
+                db.session.delete(settlement)
+            db.session.delete(target)
+
+        # Lösche das Objective selbst
+        db.session.delete(objective)
+        db.session.commit()
+
+        logger.info(f"Objective {objective_id} and related data deleted successfully")
+        return jsonify({'message': f'Objective {objective_id} und zugehörige Daten gelöscht'}), 200
+
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        logger.error(f"Database error deleting objective {objective_id}: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error deleting objective {objective_id}: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route("/api/syntheticcz-summary", methods=["GET"])
+@require_api_key
+def syntheticcz_summary():
+    """
+    Gibt SyntheticCZ-Events gruppiert nach StarSystem, Faction, CZ-Type und Cmdr zurück, mit Zeitfilter.
+    Optionaler Query-Parameter: system_name (filtert auf e.starsystem)
+    """
+    try:
+        period = request.args.get("period", "all")
+        today = datetime.utcnow()
+        start = end = None
+
+        # --- Erweiterung für Tick-Filter ---
+        tick_filter = None
+        if period == "ct":
+            # Aktuelle tickid bestimmen
+            tickid_row = db.session.execute(
+                text("SELECT tickid FROM event WHERE tickid IS NOT NULL ORDER BY timestamp DESC LIMIT 1")).fetchone()
+            if tickid_row and tickid_row[0]:
+                tick_filter = f"e.tickid = '{tickid_row[0]}'"
+            else:
+                tick_filter = "1=0"
+        elif period == "lt":
+            # Die beiden letzten unterschiedlichen tickids bestimmen
+            tickids = db.session.execute(text(
+                "SELECT DISTINCT tickid FROM event WHERE tickid IS NOT NULL ORDER BY timestamp DESC LIMIT 2")).fetchall()
+            if len(tickids) == 2:
+                current_tickid = tickids[0][0]
+                last_tickid = tickids[1][0]
+                tick_filter = f"e.tickid = '{last_tickid}'"
+            elif len(tickids) == 1:
+                tick_filter = f"e.tickid = '{tickids[0][0]}'"
+            else:
+                tick_filter = "1=0"
+        # --- Ende Tick-Filter ---
+
+        if period in ("ct", "lt"):
+            date_filter = tick_filter
+        else:
+            # ...bestehende Zeiträume...
+            if period == "cw":
+                start = today - timedelta(days=today.weekday())
+                end = start + timedelta(days=6)
+            elif period == "lw":
+                end = today - timedelta(days=today.weekday() + 1)
+                start = end - timedelta(days=6)
+            elif period == "cm":
+                start = today.replace(day=1)
+                end = (start + relativedelta(months=1)) - timedelta(days=1)
+            elif period == "lm":
+                this_month_start = today.replace(day=1)
+                start = this_month_start - relativedelta(months=1)
+                end = this_month_start - timedelta(days=1)
+            elif period == "2m":
+                this_month_start = today.replace(day=1)
+                start = this_month_start - relativedelta(months=2)
+                end = this_month_start - timedelta(days=1)
+            elif period == "y":
+                start = today.replace(month=1, day=1)
+                end = today.replace(month=12, day=31)
+            elif period == "cd":
+                start = end = today
+            elif period == "ld":
+                start = end = today - timedelta(days=1)
+
+            if start and end:
+                date_filter = f"e.timestamp BETWEEN '{start.strftime('%Y-%m-%dT00:00:00Z')}' AND '{end.strftime('%Y-%m-%dT23:59:59Z')}'"
+            else:
+                date_filter = "1=1"
+
+        # system_name-Filter ergänzen
+        system_name = request.args.get("system_name")
+        if system_name:
+            date_filter = f"{date_filter} AND e.starsystem = :system_name"
+
+        sql = f"""
+            SELECT
+                e.starsystem AS starsystem,
+                scz.faction,
+                scz.cz_type,
+                e.cmdr,
+                COUNT(*) AS cz_count
+            FROM synthetic_cz scz
+            JOIN event e ON e.id = scz.event_id
+            WHERE {date_filter}
+            GROUP BY e.starsystem, scz.faction, scz.cz_type, e.cmdr
+            ORDER BY cz_count DESC
+        """
+
+        params = {}
+        if system_name:
+            params["system_name"] = system_name
+
+        result = db.session.execute(text(sql), params).fetchall()
+        data = [dict(row._mapping) for row in result]
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/syntheticgroundcz-summary", methods=["GET"])
+@require_api_key
+def syntheticgroundcz_summary():
+    """
+    Gibt SyntheticGroundCZ-Events gruppiert nach StarSystem, Faction, Settlement, CZ-Type und Cmdr zurück, mit Zeitfilter.
+    Optionaler Query-Parameter: system_name (filtert auf e.starsystem)
+    """
+    try:
+        period = request.args.get("period", "all")
+        today = datetime.utcnow()
+        start = end = None
+
+        # --- Erweiterung für Tick-Filter ---
+        tick_filter = None
+        if period == "ct":
+            # Aktuelle tickid bestimmen
+            tickid_row = db.session.execute(
+                text("SELECT tickid FROM event WHERE tickid IS NOT NULL ORDER BY timestamp DESC LIMIT 1")).fetchone()
+            if tickid_row and tickid_row[0]:
+                tick_filter = f"e.tickid = '{tickid_row[0]}'"
+            else:
+                tick_filter = "1=0"
+        elif period == "lt":
+            # Die beiden letzten unterschiedlichen tickids bestimmen
+            tickids = db.session.execute(text(
+                "SELECT DISTINCT tickid FROM event WHERE tickid IS NOT NULL ORDER BY timestamp DESC LIMIT 2")).fetchall()
+            if len(tickids) == 2:
+                current_tickid = tickids[0][0]
+                last_tickid = tickids[1][0]
+                tick_filter = f"e.tickid = '{last_tickid}'"
+            elif len(tickids) == 1:
+                tick_filter = f"e.tickid = '{tickids[0][0]}'"
+            else:
+                tick_filter = "1=0"
+        # --- Ende Tick-Filter ---
+
+        if period in ("ct", "lt"):
+            date_filter = tick_filter
+        else:
+            # ...bestehende Zeiträume...
+            if period == "cw":
+                start = today - timedelta(days=today.weekday())
+                end = start + timedelta(days=6)
+            elif period == "lw":
+                end = today - timedelta(days=today.weekday() + 1)
+                start = end - timedelta(days=6)
+            elif period == "cm":
+                start = today.replace(day=1)
+                end = (start + relativedelta(months=1)) - timedelta(days=1)
+            elif period == "lm":
+                this_month_start = today.replace(day=1)
+                start = this_month_start - relativedelta(months=1)
+                end = this_month_start - timedelta(days=1)
+            elif period == "2m":
+                this_month_start = today.replace(day=1)
+                start = this_month_start - relativedelta(months=2)
+                end = this_month_start - timedelta(days=1)
+            elif period == "y":
+                start = today.replace(month=1, day=1)
+                end = today.replace(month=12, day=31)
+            elif period == "cd":
+                start = end = today
+            elif period == "ld":
+                start = end = today - timedelta(days=1)
+
+            if start and end:
+                date_filter = f"e.timestamp BETWEEN '{start.strftime('%Y-%m-%dT00:00:00Z')}' AND '{end.strftime('%Y-%m-%dT23:59:59Z')}'"
+            else:
+                date_filter = "1=1"
+
+        # system_name-Filter ergänzen
+        system_name = request.args.get("system_name")
+        if system_name:
+            date_filter = f"{date_filter} AND e.starsystem = :system_name"
+
+        sql = f"""
+            SELECT
+                e.starsystem AS starsystem,
+                sgcz.faction,
+                sgcz.settlement,
+                sgcz.cz_type,
+                e.cmdr,
+                COUNT(*) AS cz_count
+            FROM synthetic_ground_cz sgcz
+            JOIN event e ON e.id = sgcz.event_id
+            WHERE {date_filter}
+            GROUP BY e.starsystem, sgcz.faction, sgcz.settlement, sgcz.cz_type, e.cmdr
+            ORDER BY cz_count DESC
+        """
+
+        params = {}
+        if system_name:
+            params["system_name"] = system_name
+
+        result = db.session.execute(text(sql), params).fetchall()
+        data = [dict(row._mapping) for row in result]
+        return jsonify(data)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

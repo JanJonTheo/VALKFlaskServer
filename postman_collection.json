@@ -96,6 +96,47 @@
               "path": ["activities"]
             }
           }
+        },
+        {
+          "name": "Get Activities",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/activities?tick=current&cmdr=&system=&faction=",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "activities"],
+              "query": [
+                {
+                  "key": "tick",
+                  "value": "current",
+                  "description": "Filter: current, last, tickid"
+                },
+                {
+                  "key": "cmdr",
+                  "value": "",
+                  "description": "Filter nach Cmdr"
+                },
+                {
+                  "key": "system",
+                  "value": "",
+                  "description": "Filter nach Systemname"
+                },
+                {
+                  "key": "faction",
+                  "value": "",
+                  "description": "Filter nach Fraktionsname"
+                }
+              ]
+            }
+          },
+          "description": "Gibt alle Activities inkl. verknüpfter Systeme und Fraktionen zurück. Optional nach Tick, Cmdr, System und Fraktion filterbar."
         }
       ]
     },

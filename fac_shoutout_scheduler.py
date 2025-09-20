@@ -16,17 +16,21 @@ _scheduler_instance = None
 
 
 def init_logger():
-    log_path = Path(__file__).parent / "tick_scheduler.log"
+    logs_dir = Path(__file__).parent / "logs"
+    logs_dir.mkdir(exist_ok=True)
+    log_path = logs_dir / "shoutout.log"
     print(f"Log Path: {log_path.resolve()}")
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        handlers=[
-            RotatingFileHandler(log_path, maxBytes=128 * 1024 * 1024, backupCount=3),
-            logging.StreamHandler()
-        ],
-        force=True
-    )
+    logger = logging.getLogger("fac_shoutout_scheduler")
+    logger.setLevel(logging.INFO)
+    log_handler = RotatingFileHandler(log_path, maxBytes=128 * 1024 * 1024, backupCount=3)
+    stream_handler = logging.StreamHandler()
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+    log_handler.setFormatter(formatter)
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(log_handler)
+    logger.addHandler(stream_handler)
+    logger.propagate = False
+    return logger
 
 
 def get_tenants():
@@ -56,7 +60,7 @@ def get_engine_for_tenant(tenant):
 
 
 def format_discord_summary(app=None, db=None):
-    init_logger()
+    logger = init_logger()
     tenants = get_tenants()
     from sqlalchemy import text
 
@@ -213,11 +217,11 @@ def format_discord_summary(app=None, db=None):
     for tenant in tenants:
         engine = get_engine_for_tenant(tenant)
         if not engine:
-            logging.warning(f"Kein DB-URI für Tenant {tenant.get('name')}, überspringe.")
+            logger.warning(f"Kein DB-URI für Tenant {tenant.get('name')}, überspringe.")
             continue
         webhook_url = get_discord_webhook(tenant, "shoutout")
         if not webhook_url:
-            logging.warning(f"Kein Discord-Webhook für Tenant {tenant.get('name')}, überspringe.")
+            logger.warning(f"Kein Discord-Webhook für Tenant {tenant.get('name')}, überspringe.")
             continue
 
         with engine.connect() as conn:
@@ -226,7 +230,7 @@ def format_discord_summary(app=None, db=None):
                 try:
                     rows = conn.execute(text(q["sql"]), {"start": start_str, "end": end_str}).fetchall()
                 except Exception as e:
-                    logging.error(f"Query-Fehler für {tenant.get('name')} - {title}: {e}")
+                    logger.error(f"Query-Fehler für {tenant.get('name')} - {title}: {e}")
                     continue
                 if not rows:
                     continue
@@ -234,19 +238,19 @@ def format_discord_summary(app=None, db=None):
                 sections.append(section)
 
             if not sections:
-                logging.info(f"No data found for Discord summary ({tenant.get('name')}).")
+                logger.info(f"No data found for Discord summary ({tenant.get('name')}).")
                 continue
 
             full_message = f"📅 Daily Summary for {start.date()} (UTC) - {tenant.get('name')}\n\n" + "\n\n".join(sections)
             response = requests.post(webhook_url, json={"content": full_message})
             if response.status_code == 204:
-                logging.info(f"Discord summary sent successfully for {tenant.get('name')}.")
+                logger.info(f"Discord summary sent successfully for {tenant.get('name')}.")
             else:
-                logging.error(f"Discord post failed for {tenant.get('name')}: {response.status_code} {response.text}")
+                logger.error(f"Discord post failed for {tenant.get('name')}: {response.status_code} {response.text}")
 
 
 def send_syntheticcz_summary_to_discord(app, db, period="all", tenant=None):
-    init_logger()
+    logger = init_logger()
     from sqlalchemy import text
     import requests
 
@@ -298,11 +302,11 @@ def send_syntheticcz_summary_to_discord(app, db, period="all", tenant=None):
     for t in tenants:
         engine = get_engine_for_tenant(t)
         if not engine:
-            logging.warning(f"Kein DB-URI für Tenant {t.get('name')}, überspringe.")
+            logger.warning(f"Kein DB-URI für Tenant {t.get('name')}, überspringe.")
             continue
         webhook_url = get_discord_webhook(t, "shoutout")
         if not webhook_url:
-            logging.warning(f"Kein Discord-Webhook für Tenant {t.get('name')}, überspringe.")
+            logger.warning(f"Kein Discord-Webhook für Tenant {t.get('name')}, überspringe.")
             continue
 
         with engine.connect() as conn:
@@ -366,13 +370,13 @@ def send_syntheticcz_summary_to_discord(app, db, period="all", tenant=None):
                 msg = "\n".join(lines)
                 response = requests.post(webhook_url, json={"content": msg})
                 if response.status_code == 204:
-                    logging.info(f"SyntheticCZ Discord summary sent for {system} ({t.get('name')}).")
+                    logger.info(f"SyntheticCZ Discord summary sent for {system} ({t.get('name')}).")
                 else:
-                    logging.error(f"SyntheticCZ Discord post failed for {system} ({t.get('name')}): {response.status_code} {response.text}")
+                    logger.error(f"SyntheticCZ Discord post failed for {system} ({t.get('name')}): {response.status_code} {response.text}")
 
 
 def send_syntheticgroundcz_summary_to_discord(app, db, period="all", tenant=None):
-    init_logger()
+    logger = init_logger()
     from sqlalchemy import text
     import requests
 
@@ -424,11 +428,11 @@ def send_syntheticgroundcz_summary_to_discord(app, db, period="all", tenant=None
     for t in tenants:
         engine = get_engine_for_tenant(t)
         if not engine:
-            logging.warning(f"Kein DB-URI für Tenant {t.get('name')}, überspringe.")
+            logger.warning(f"Kein DB-URI für Tenant {t.get('name')}, überspringe.")
             continue
         webhook_url = get_discord_webhook(t, "shoutout")
         if not webhook_url:
-            logging.warning(f"Kein Discord-Webhook für Tenant {t.get('name')}, überspringe.")
+            logger.warning(f"Kein Discord-Webhook für Tenant {t.get('name')}, überspringe.")
             continue
 
         with engine.connect() as conn:
@@ -512,18 +516,19 @@ def send_syntheticgroundcz_summary_to_discord(app, db, period="all", tenant=None
                 msg = "\n".join(lines)
                 response = requests.post(webhook_url, json={"content": msg})
                 if response.status_code == 204:
-                    logging.info(f"SyntheticGroundCZ Discord summary sent for {system} ({t.get('name')}).")
+                    logger.info(f"SyntheticGroundCZ Discord summary sent for {system} ({t.get('name')}).")
                 else:
-                    logging.error(f"SyntheticGroundCZ Discord post failed for {system} ({t.get('name')}): {response.status_code} {response.text}")
+                    logger.error(f"SyntheticGroundCZ Discord post failed for {system} ({t.get('name')}): {response.status_code} {response.text}")
 
 
 def start_scheduler(app, db):
     global _scheduler_instance
     if _scheduler_instance is not None:
-        logging.info("Scheduler already started, skipping duplicate.")
+        logger = init_logger()
+        logger.info("Scheduler already started, skipping duplicate.")
         return
 
-    init_logger()
+    logger = init_logger()
     scheduler = BackgroundScheduler(timezone="UTC")
     # Täglicher Discord-Summary-Job
     scheduler.add_job(
@@ -541,5 +546,5 @@ def start_scheduler(app, db):
         CronTrigger(hour=0, minute=2, timezone="UTC")
     )
     scheduler.start()
-    logging.info("[SchedulerShoutout] Shoutout scheduled with daily interval at 0:00 UTC.")
+    logger.info("[SchedulerShoutout] Shoutout scheduled with daily interval at 0:00 UTC.")
     atexit.register(lambda: scheduler.shutdown())

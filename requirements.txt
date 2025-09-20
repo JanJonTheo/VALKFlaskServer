@@ -22,3 +22,4 @@ idna~=3.10
 charset-normalizer~=3.4.3
 importlib-metadata~=8.7.0
 pyzmq~=27.1.0
+waitress~=3.0.2

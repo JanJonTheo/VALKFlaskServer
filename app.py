@@ -16,17 +16,13 @@ from dateutil.relativedelta import relativedelta
 import os
 import json
 import ast
+from activities import activities_bp
 
 # Lade Umgebungsvariablen aus .env
 from dotenv import load_dotenv
-load_dotenv()
 
-# Hilfsfunktion zum Abrufen des Discord-Webhooks aus dem Tenant
-def get_discord_webhook(webhook_type):
-    tenant = getattr(g, "tenant", None)
-    if tenant and "discord_webhooks" in tenant:
-        return tenant["discord_webhooks"].get(webhook_type)
-    return None
+# Lade Umgebungsvariablen
+load_dotenv()
 
 # Default API version
 API_VERSION = os.getenv("API_VERSION_PROD", "1.6.0")
@@ -35,12 +31,6 @@ API_VERSION = os.getenv("API_VERSION_PROD", "1.6.0")
 TENANT_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "tenant.json")
 with open(TENANT_CONFIG_PATH, "r", encoding="utf-8") as f:
     TENANTS = json.load(f)
-
-def get_tenant_by_apikey(apikey):
-    for tenant in TENANTS:
-        if tenant["api_key"] == apikey:
-            return tenant
-    return None
 
 # Logging setup
 LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
@@ -60,7 +50,21 @@ logger = logging.getLogger(__name__)
 last_known_tickid = {"value": None}
 
 app = Flask(__name__)
+app.register_blueprint(activities_bp)
 
+##################################################################
+# Hilfsfunktionen für VALK API
+##################################################################
+
+# Initiale DB-Konfiguration (wird pro Tenant überschrieben)
+def get_tenant_by_apikey(apikey):
+    for tenant in TENANTS:
+        if tenant["api_key"] == apikey:
+            return tenant
+    return None
+
+
+# Setze die DB-Konfiguration für den aktuellen Tenant
 def set_tenant_db_config(tenant):
     """Setzt die DB-Konfiguration für den aktuellen Tenant im Request-Kontext.
     - Bei SQLite: Falls die Datei fehlt, wird sie inkl. Tabellenstruktur angelegt.
@@ -117,11 +121,13 @@ def set_tenant_db_config(tenant):
         g.tenant_db_error = str(e)
 
 
+# Request teardown: Session entfernen
 @app.teardown_appcontext
 def remove_session(exception=None):
     db.session.remove()
 
 
+# Decorator to require API key and set tenant context
 def require_api_key(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -154,6 +160,7 @@ def require_api_key(f):
     return decorated
 
 
+# Lade initial das letzte bekannte tickid für alle Tenants
 def get_latest_tickid():
     """
     Holt für alle Tenants das aktuellste tickid aus deren Datenbank
@@ -182,6 +189,19 @@ def get_latest_tickid():
             last_known_tickid[tenant_name] = None
 
 
+# Hilfsfunktion zum Abrufen des Discord-Webhooks aus dem Tenant
+def get_discord_webhook(webhook_type):
+    tenant = getattr(g, "tenant", None)
+    if tenant and "discord_webhooks" in tenant:
+        return tenant["discord_webhooks"].get(webhook_type)
+    return None
+
+
+##################################################################
+# BGS-Tally Funktionen
+##################################################################
+
+# Event-Endpoint
 @app.route("/events", methods=["POST"])
 @require_api_key
 def post_events():
@@ -320,9 +340,10 @@ def post_events():
         # Detect tickid change
         incoming_tickids = {event.get("tickid") for event in events_data if event.get("tickid")}
         current_tickid = next(iter(incoming_tickids), None)
+        last_tickid = last_known_tickid.get("value")
 
-        if current_tickid and last_known_tickid["value"] != current_tickid:
-            logger.info(f"Tick changed: {last_known_tickid['value']} → {current_tickid}")
+        if current_tickid and last_tickid != current_tickid:
+            logger.info(f"Tick changed: {last_tickid} → {current_tickid}")
             last_known_tickid["value"] = current_tickid
 
         return jsonify({"status": "success"}), 200
@@ -332,51 +353,81 @@ def post_events():
         logger.error(f"Event Request Json: {str(request.get_json())}")
         return jsonify({"error": str(e)}), 400
 
-@app.route("/activities", methods=["PUT"])
-@require_api_key
-def put_activities():
+
+# Activities-Endpoint
+# > moved to activities.py blueprint
+
+
+# Discovery-Endpoint
+@app.route("/discovery", methods=["GET"])
+def discovery():
+    """Discovery endpoint providing server capabilities and information"""
     try:
-        activity_data = request.get_json()
-        validated = activity_data
+        discovery_response = {
+            "name": os.getenv("SERVER_NAME_PROD"),
+            "description": os.getenv("SERVER_DESCRIPTION_PROD"),
+            "url": os.getenv("SERVER_URL_PROD"),
+            "endpoints": {
+                "events": {
+                    "path": "/events",
+                    "minPeriod": "10",
+                    "maxBatch": "100"
+                },
+                "activities": {
+                    "path": "/activities",
+                    "minPeriod": "60",
+                    "maxBatch": "10"
+                },
+                "objectives": {
+                    "path": "/objectives",
+                    "minPeriod": "30",
+                    "maxBatch": "20"
+                }
+            },
+            "headers": {
+                "apikey": {
+                    "required": True,
+                    "description": "API key for authentication"
+                },
+                "apiversion": {
+                    "required": True,
+                    "description": "The version of the API in x.y.z notation",
+                    "current": API_VERSION
+                }
+            }
+        }
 
-        activity = Activity(
-            tickid=validated['tickid'],
-            ticktime=validated['ticktime'],
-            timestamp=validated['timestamp'],
-            cmdr=validated.get('cmdr')
-        )
+        return jsonify(discovery_response), 200
 
-        for sys in validated['systems']:
-            system = System(name=sys['name'], address=sys['address'])
-            for fac in sys['factions']:
-                faction = Faction(
-                    name=fac['name'],
-                    state=fac['state'],
-                    bvs=fac.get('bvs', 0),
-                    cbs=fac.get('cbs', 0),
-                    exobiology=fac.get('exobiology', 0),
-                    exploration=fac.get('exploration', 0),
-                    scenarios=fac.get('scenarios', 0),
-                    infprimary=fac.get('infprimary', 0),
-                    infsecondary=fac.get('infsecondary', 0),
-                    missionfails=fac.get('missionfails', 0),
-                    murdersground=fac.get('murdersground', 0),
-                    murdersspace=fac.get('murdersspace', 0),
-                    tradebm=fac.get('tradebm', 0)
-                )
-                system.factions.append(faction)
-            activity.systems.append(system)
-
-        db.session.add(activity)
-        db.session.commit()
-
-        return jsonify({"status": "activity saved"}), 200
     except Exception as e:
-        db.session.rollback()
-        logger.error(f"Activity processing error: {str(e)}")
-        return jsonify({"error": str(e)}), 400
+        logger.error(f"Discovery endpoint error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
 
 
+# Root-Endpoint
+@app.route("/", methods=["GET"])
+def root():
+    """Root endpoint providing basic server information"""
+    try:
+        return jsonify({
+            "message": "VALK Flask Server is running",
+            "version": os.getenv("API_VERSION_PROD", "1.6.0"),
+            "name": os.getenv("SERVER_NAME_PROD", "VALK Flask Server"),
+            "endpoints": {
+                "discovery": "/discovery",
+                "api": "/api/"
+            }
+        }), 200
+    except Exception as e:
+        logger.error(f"Root endpoint error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
+#################################################################
+# Summary-API, Leaderboard-API, Recruits-API, Table-API
+##################################################################
+
+# Summary-API Endpoint
 @app.route("/api/summary/<key>", methods=["GET"])
 @require_api_key
 def summary_api(key):
@@ -559,6 +610,7 @@ def summary_api(key):
         return jsonify({"error": str(e)}), 500
 
 
+# Summary Top5-API Endpoint
 @app.route("/api/summary/top5/<key>", methods=["GET"])
 @require_api_key
 def summary_top5_api(key):
@@ -785,6 +837,369 @@ def summary_top5_api(key):
         return jsonify({"error": str(e)}), 500
 
 
+# Summary Leaderboard Endpoint
+@app.route("/api/summary/leaderboard", methods=["GET"])
+@require_api_key
+def leaderboard_summary():
+    try:
+        period = request.args.get("period", "all")
+        today = datetime.utcnow()
+
+        # Einheitliche Filter-Strings + Parameter-Container
+        date_filter = "1=1"
+        date_filter_sub = "1=1"
+        params = {}
+
+        # --- Tick-basierte Perioden (ct = current tick, lt = last tick) ---
+        if period in ("ct", "lt"):
+            if period == "ct":
+                row = db.session.execute(
+                    text("SELECT tickid FROM event WHERE tickid IS NOT NULL ORDER BY timestamp DESC LIMIT 1")
+                ).fetchone()
+                if row and row[0]:
+                    params["tickid"] = row[0]
+                    date_filter = "e.tickid = :tickid"
+                    date_filter_sub = "ex.tickid = :tickid"
+                else:
+                    date_filter = date_filter_sub = "1=0"
+            else:  # lt
+                rows = db.session.execute(
+                    text("SELECT DISTINCT tickid FROM event WHERE tickid IS NOT NULL ORDER BY timestamp DESC LIMIT 2")
+                ).fetchall()
+                if rows:
+                    last_tickid = rows[1][0] if len(rows) == 2 else rows[0][0]
+                    params["tickid"] = last_tickid
+                    date_filter = "e.tickid = :tickid"
+                    date_filter_sub = "ex.tickid = :tickid"
+                else:
+                    date_filter = date_filter_sub = "1=0"
+
+        # --- Zeitbasierte Perioden ---
+        else:
+            start = end = None
+            if period == "cw":  # current week
+                start = today - timedelta(days=today.weekday())
+                end = start + timedelta(days=6)
+            elif period == "lw":  # last week
+                end = today - timedelta(days=today.weekday() + 1)
+                start = end - timedelta(days=6)
+            elif period == "cm":  # current month
+                start = today.replace(day=1)
+                end = (start + relativedelta(months=1)) - timedelta(days=1)
+            elif period == "lm":  # last month
+                this_month_start = today.replace(day=1)
+                start = this_month_start - relativedelta(months=1)
+                end = this_month_start - timedelta(days=1)
+            elif period == "2m":  # last two full months
+                this_month_start = today.replace(day=1)
+                start = this_month_start - relativedelta(months=2)
+                end = this_month_start - timedelta(days=1)
+            elif period == "y":  # year-to-date
+                start = today.replace(month=1, day=1)
+                end = today.replace(month=12, day=31)
+            elif period == "cd":  # current day
+                start = end = today
+            elif period == "ld":  # last day
+                start = end = today - timedelta(days=1)
+
+            if start and end:
+                date_from = start.strftime('%Y-%m-%dT00:00:00Z')
+                date_to = end.strftime('%Y-%m-%dT23:59:59Z')
+                date_filter = f"e.timestamp BETWEEN '{date_from}' AND '{date_to}'"
+                date_filter_sub = f"ex.timestamp BETWEEN '{date_from}' AND '{date_to}'"
+            else:
+                date_filter = "1=1"
+                date_filter_sub = "1=1"
+
+        # --- Optionaler System-Filter ---
+        system_name = request.args.get("system_name")
+        if system_name:
+            date_filter += " AND e.starsystem = :system_name"
+            date_filter_sub += " AND ex.starsystem = :system_name"
+            params["system_name"] = system_name  # <- aus Request, nicht aus Tenant! :contentReference[oaicite:2]{index=2}
+
+        sql = f"""
+            SELECT e.cmdr,
+               c.squadron_rank AS rank,
+               SUM(CASE WHEN mb.event_id IS NOT NULL THEN mb.value ELSE 0 END) AS total_buy,
+               SUM(CASE WHEN ms.event_id IS NOT NULL THEN ms.value ELSE 0 END) AS total_sell,
+               CASE
+                   WHEN SUM(CASE WHEN ms.event_id IS NOT NULL THEN ms.value ELSE 0 END) > 0
+                   THEN SUM(CASE WHEN ms.event_id IS NOT NULL THEN ms.value ELSE 0 END)
+                        - SUM(CASE WHEN mb.event_id IS NOT NULL THEN mb.value ELSE 0 END)
+                   ELSE 0
+               END AS profit,
+               ROUND(
+                 CASE
+                   WHEN SUM(CASE WHEN ms.event_id IS NOT NULL THEN ms.value ELSE 0 END) > 0 AND
+                        SUM(CASE WHEN mb.event_id IS NOT NULL THEN mb.value ELSE 0 END) > 0
+                   THEN (SUM(CASE WHEN ms.event_id IS NOT NULL THEN ms.value ELSE 0 END)
+                         - SUM(CASE WHEN mb.event_id IS NOT NULL THEN mb.value ELSE 0 END)) * 100.0
+                        / SUM(CASE WHEN mb.event_id IS NOT NULL THEN mb.value ELSE 0 END)
+                   ELSE 0
+                 END, 2
+               ) AS profitability,
+
+               SUM(CASE WHEN mb.event_id IS NOT NULL THEN mb.count ELSE 0 END) +
+               SUM(CASE WHEN ms.event_id IS NOT NULL THEN ms.count ELSE 0 END) AS total_quantity,
+
+               SUM(CASE WHEN mb.event_id IS NOT NULL THEN mb.value ELSE 0 END) +
+               SUM(CASE WHEN ms.event_id IS NOT NULL THEN ms.value ELSE 0 END) AS total_volume,
+
+               (
+                 SELECT COUNT(*)
+                 FROM mission_completed_event mc
+                 JOIN event ex ON ex.id = mc.event_id
+                 WHERE ex.cmdr = e.cmdr AND {date_filter_sub}
+               ) AS missions_completed,
+
+               (
+                 SELECT COUNT(*)
+                 FROM mission_failed_event mf
+                 JOIN event ex ON ex.id = mf.event_id
+                 WHERE ex.cmdr = e.cmdr AND {date_filter_sub}
+               ) AS missions_failed,
+
+               (
+                 SELECT SUM(rv.amount)
+                 FROM redeem_voucher_event rv
+                 JOIN event ex ON ex.id = rv.event_id
+                 WHERE ex.cmdr = e.cmdr AND rv.type = 'bounty' AND {date_filter_sub}
+               ) AS bounty_vouchers,
+
+               (
+                 SELECT SUM(rv.amount)
+                 FROM redeem_voucher_event rv
+                 JOIN event ex ON ex.id = rv.event_id
+                 WHERE ex.cmdr = e.cmdr AND rv.type = 'CombatBond' AND {date_filter_sub}
+               ) AS combat_bonds,
+
+               (
+                 SELECT SUM(t.total_sales)
+                 FROM (
+                   SELECT se.earnings AS total_sales
+                   FROM sell_exploration_data_event se
+                   JOIN event ex ON ex.id = se.event_id
+                   WHERE ex.cmdr = e.cmdr AND {date_filter_sub}
+                   UNION ALL
+                   SELECT me.total_earnings AS total_sales
+                   FROM multi_sell_exploration_data_event me
+                   JOIN event ex ON ex.id = me.event_id
+                   WHERE ex.cmdr = e.cmdr AND {date_filter_sub}
+                 ) t
+               ) AS exploration_sales,
+
+               (
+                 SELECT SUM(LENGTH(mci.influence))
+                 FROM mission_completed_influence mci
+                 JOIN mission_completed_event mce ON mce.event_id = mci.mission_id
+                 JOIN event ex ON ex.id = mce.event_id
+                 WHERE ex.cmdr = e.cmdr
+                 AND mci.faction_name LIKE :faction_name_like
+                 AND {date_filter_sub}
+               ) AS influence_eic,
+
+               (
+                 SELECT SUM(cc.bounty)
+                 FROM commit_crime_event cc
+                 JOIN event ex ON ex.id = cc.event_id
+                 WHERE ex.cmdr = e.cmdr AND {date_filter_sub}
+               ) AS bounty_fines
+
+            FROM event e
+            LEFT JOIN cmdr c ON c.name = e.cmdr
+            LEFT JOIN market_buy_event mb ON mb.event_id = e.id
+            LEFT JOIN market_sell_event ms ON ms.event_id = e.id
+            WHERE e.cmdr IS NOT NULL AND {date_filter}
+            GROUP BY e.cmdr
+            ORDER BY e.cmdr
+        """
+
+        # LIKE-Parameter für EIC-Influence
+        params["faction_name_like"] = f"%{g.tenant['faction_name']}%"
+
+        result = db.session.execute(text(sql), params).fetchall()
+        data = [dict(row._mapping) for row in result]
+        return jsonify(data)
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# Summary Recruits-API Endpoint
+@app.route("/api/summary/recruits", methods=["GET"])
+@require_api_key
+def summary_recruits():
+    try:
+        sql = """
+              SELECT e.cmdr                                                      AS commander, \
+                     CASE WHEN COUNT(e.id) > 0 THEN 'Yes' ELSE 'No' END          AS has_data, \
+                     MAX(e.timestamp)                                            AS last_active, \
+                     CAST(julianday('now') - julianday(MIN(e.timestamp)) AS INT) AS days_since_join, \
+                     (SELECT COALESCE(SUM(mb.count), 0) + COALESCE((SELECT SUM(ms.count)
+                                                                    FROM market_sell_event ms
+                                                                             JOIN event e2 ON e2.id = ms.event_id
+                                                                    WHERE e2.cmdr = e.cmdr), 0)
+                      FROM market_buy_event mb
+                               JOIN event e1 ON e1.id = mb.event_id
+                      WHERE e1.cmdr = e.cmdr)                                    AS tonnage, \
+                     (SELECT COUNT(*)
+                      FROM mission_completed_event mc
+                               JOIN event ev ON ev.id = mc.event_id
+                      WHERE ev.cmdr = e.cmdr)                                    AS mission_count, \
+                     (SELECT SUM(rv.amount)
+                      FROM redeem_voucher_event rv
+                               JOIN event ev ON ev.id = rv.event_id
+                      WHERE ev.cmdr = e.cmdr \
+                        AND rv.type = 'bounty')                                  AS bounty_claims, \
+                     (SELECT SUM(total)
+                      FROM (SELECT se.earnings AS total \
+                            FROM sell_exploration_data_event se \
+                                     JOIN event ev ON ev.id = se.event_id \
+                            WHERE ev.cmdr = e.cmdr \
+                            UNION ALL \
+                            SELECT me.total_earnings AS total \
+                            FROM multi_sell_exploration_data_event me \
+                                     JOIN event ev ON ev.id = me.event_id \
+                            WHERE ev.cmdr = e.cmdr))                             AS exp_value, \
+                     (SELECT SUM(rv.amount)
+                      FROM redeem_voucher_event rv
+                               JOIN event ev ON ev.id = rv.event_id
+                      WHERE ev.cmdr = e.cmdr \
+                        AND rv.type = 'CombatBond')                              AS combat_bonds, \
+                     (SELECT SUM(cc.bounty)
+                      FROM commit_crime_event cc
+                               JOIN event ev ON ev.id = cc.event_id
+                      WHERE ev.cmdr = e.cmdr)                                    AS bounty_fines
+              FROM event e
+                       JOIN cmdr c ON c.name = e.cmdr
+              WHERE e.cmdr IS NOT NULL \
+                AND c.squadron_rank = 'Recruit'
+              GROUP BY e.cmdr
+              ORDER BY days_since_join ASC \
+              """
+        result = db.session.execute(text(sql)).fetchall()
+        data = [dict(row._mapping) for row in result]
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# Bounty Vouchers-API Endpoint
+@app.route("/api/bounty-vouchers", methods=["GET"])
+@require_api_key
+def get_bounty_vouchers():
+    """
+    Gibt alle Bounty Vouchers mit den Spalten Cmdr, Squadron Rank, System, timestamp, tick-id, amount, type, faction zurück.
+    Unterstützt Filter über Query-Parameter: cmdr, system, tickid, type, faction, squadron_rank, period.
+    period: cw,lw,cm,lm,2m,y,cd,ld sowie tick-basiert ct (current tick), lt (last tick).
+    """
+    try:
+        # Filter-Parameter auslesen
+        cmdr = request.args.get("cmdr")
+        system = request.args.get("system")
+        tickid = request.args.get("tickid")
+        voucher_type = request.args.get("type", "bounty")
+        faction = request.args.get("faction")
+        squadron_rank = request.args.get("squadron_rank")
+        period = request.args.get("period", "all")
+
+        # Zeitraum-/Tick-Filter
+        today = datetime.utcnow()
+        start = end = None
+
+        if period == "cw":
+            start = today - timedelta(days=today.weekday())
+            end = start + timedelta(days=6)
+        elif period == "lw":
+            end = today - timedelta(days=today.weekday() + 1)
+            start = end - timedelta(days=6)
+        elif period == "cm":
+            start = today.replace(day=1)
+            end = (start + relativedelta(months=1)) - timedelta(days=1)
+        elif period == "lm":
+            this_month_start = today.replace(day=1)
+            start = this_month_start - relativedelta(months=1)
+            end = this_month_start - timedelta(days=1)
+        elif period == "2m":
+            this_month_start = today.replace(day=1)
+            start = this_month_start - relativedelta(months=2)
+            end = this_month_start - timedelta(days=1)
+        elif period == "y":
+            start = today.replace(month=1, day=1)
+            end = today.replace(month=12, day=31)
+        elif period == "cd":
+            start = end = today
+        elif period == "ld":
+            start = end = today - timedelta(days=1)
+        elif period in ("ct", "lt"):
+            # Tick-basiert korrekt bestimmen:
+            #  - pro tickid gruppieren
+            #  - nach MAX(timestamp) absteigend sortieren
+            #  - ct = OFFSET 0, lt = OFFSET 1
+            tick_sql = """
+                SELECT tickid
+                FROM event
+                WHERE tickid IS NOT NULL
+                GROUP BY tickid
+                ORDER BY MAX(timestamp) DESC
+                LIMIT :limit OFFSET :offset
+            """
+            offset = 0 if period == "ct" else 1
+            row = db.session.execute(text(tick_sql), {"limit": 1, "offset": offset}).fetchone()
+            if row and not tickid:
+                tickid = row[0]
+
+        # WHERE-Bedingungen
+        where_clauses = ["rv.type = :voucher_type"]
+        params = {"voucher_type": voucher_type}
+
+        if cmdr:
+            where_clauses.append("e.cmdr = :cmdr")
+            params["cmdr"] = cmdr
+        if system:
+            where_clauses.append("e.starsystem = :system")
+            params["system"] = system
+        if tickid:
+            where_clauses.append("e.tickid = :tickid")
+            params["tickid"] = tickid
+        if faction:
+            where_clauses.append("rv.faction = :faction")
+            params["faction"] = faction
+        if squadron_rank:
+            where_clauses.append("c.squadron_rank = :squadron_rank")
+            params["squadron_rank"] = squadron_rank
+        if start and end:
+            where_clauses.append("e.timestamp BETWEEN :start AND :end")
+            params["start"] = start.strftime('%Y-%m-%dT00:00:00Z')
+            params["end"]  = end.strftime('%Y-%m-%dT23:59:59Z')
+
+        where_sql = " AND ".join(where_clauses)
+
+        sql = f"""
+            SELECT
+                e.cmdr,
+                c.squadron_rank,
+                e.starsystem AS system,
+                e.timestamp,
+                e.tickid,
+                rv.amount,
+                rv.type,
+                rv.faction
+            FROM redeem_voucher_event rv
+            JOIN event e ON e.id = rv.event_id
+            LEFT JOIN cmdr c ON c.name = e.cmdr
+            WHERE {where_sql}
+            ORDER BY e.timestamp DESC
+        """
+
+        rows = db.session.execute(text(sql), params).fetchall()
+        return jsonify([dict(r._mapping) for r in rows])
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# Table-Query-API Endpoint
 @app.route("/api/table/<tablename>", methods=["GET"])
 @require_api_key
 def query_table(tablename):
@@ -806,67 +1221,11 @@ def query_table(tablename):
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/fsdjump-factions", methods=["GET"])
-@require_api_key
-def fsdjump_factions():
-    """
-    Gibt für jedes in den letzten 24h besuchte StarSystem (FSDJump, jeweils aktuellster Datensatz pro System)
-    eine Liste aller Factions im System mit deren aktuellen Daten zurück.
-    """
-    try:
-        since = datetime.utcnow() - timedelta(hours=24)
-        subq = (
-            db.session.query(
-                func.max(Event.id).label("id")
-            )
-            .filter(Event.event == "FSDJump")
-            .filter(Event.timestamp >= since)
-            .group_by(Event.starsystem)
-            .subquery()
-        )
-        events = (
-            db.session.query(Event)
-            .filter(Event.id.in_(subq))
-            .all()
-        )
-        result = []
-        for event in events:
-            raw = event.raw_json
-            if not raw:
-                continue
-            raw_json = None
-            try:
-                raw_json = ast.literal_eval(raw)
-            except Exception as ex:
-                logger.warning(f"Error parsing raw_json for Event {event.id}: {ex}")
-                continue
-            if not raw_json or "Factions" not in raw_json or not raw_json.get("StarSystem"):
-                continue
-            factions = []
-            for fac in raw_json["Factions"]:
-                factions.append({
-                    "Name": fac.get("Name"),
-                    "FactionState": fac.get("FactionState"),
-                    "Government": fac.get("Government"),
-                    "Influence": fac.get("Influence"),
-                    "Allegiance": fac.get("Allegiance"),
-                    "Happiness": fac.get("Happiness"),
-                    "MyReputation": fac.get("MyReputation"),
-                    "PendingStates": fac.get("PendingStates", []),
-                    "RecoveringStates": fac.get("RecoveringStates", []),
-                })
-            result.append({
-                "StarSystem": raw_json.get("StarSystem"),
-                "SystemAddress": raw_json.get("SystemAddress"),
-                "Timestamp": raw_json.get("timestamp"),
-                "Factions": factions
-            })
-        return jsonify(result)
-    except Exception as e:
-        logger.error(f"FSDJump-Factions-API Error: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+##################################################################
+# Discord Webhook Funktionen
+##################################################################
 
-
+# Summary Top5 an Discord senden
 @app.route("/api/summary/discord/top5all", methods=["POST"])
 @require_api_key
 def send_all_top5_to_discord():
@@ -1066,6 +1425,7 @@ def send_all_top5_to_discord():
         return jsonify({"error": str(e)}), 500
 
 
+# Daily Tick Summary an Discord senden
 @app.route("/api/summary/discord/tick", methods=["POST"])
 @require_api_key
 def trigger_daily_tick_summary():
@@ -1077,6 +1437,7 @@ def trigger_daily_tick_summary():
         return jsonify({"error": str(e)}), 500
 
 
+# SyntheticCZ Summary an Discord senden
 @app.route("/api/summary/discord/syntheticcz", methods=["POST"])
 @require_api_key
 def send_syntheticcz_summary_to_discord_api():
@@ -1095,6 +1456,7 @@ def send_syntheticcz_summary_to_discord_api():
         return jsonify({"error": str(e)}), 500
 
 
+# SyntheticGroundCZ Summary an Discord senden
 @app.route("/api/summary/discord/syntheticgroundcz", methods=["POST"])
 @require_api_key
 def send_syntheticgroundcz_summary_to_discord_api():
@@ -1113,11 +1475,18 @@ def send_syntheticgroundcz_summary_to_discord_api():
         return jsonify({"error": str(e)}), 500
 
 
+##################################################################
 # Register EIC Conflict routes
+##################################################################
 from fac_in_conflict import register_fac_conflict_routes
 register_fac_conflict_routes(app, db, require_api_key)
 
 
+##################################################################
+# Inara Sync Funktionen
+##################################################################
+
+# Cmdr-Sync mit Inara
 @app.route("/api/sync/cmdrs", methods=["POST"])
 @require_api_key
 def sync_cmdrs_api():
@@ -1128,6 +1497,11 @@ def sync_cmdrs_api():
         return jsonify({"error": str(e)}), 500
 
 
+##################################################################
+# Auth/User-Funktionen
+##################################################################
+
+# Login Endpoint
 @app.route("/api/login", methods=["POST"])
 def login_api():
     try:
@@ -1172,315 +1546,11 @@ def login_api():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/summary/leaderboard", methods=["GET"])
-@require_api_key
-def leaderboard_summary():
-    try:
-        period = request.args.get("period", "all")
-        today = datetime.utcnow()
+##################################################################
+# Objectives Funktionen
+##################################################################
 
-        # Einheitliche Filter-Strings + Parameter-Container
-        date_filter = "1=1"
-        date_filter_sub = "1=1"
-        params = {}
-
-        # --- Tick-basierte Perioden (ct = current tick, lt = last tick) ---
-        if period in ("ct", "lt"):
-            if period == "ct":
-                row = db.session.execute(
-                    text("SELECT tickid FROM event WHERE tickid IS NOT NULL ORDER BY timestamp DESC LIMIT 1")
-                ).fetchone()
-                if row and row[0]:
-                    params["tickid"] = row[0]
-                    date_filter = "e.tickid = :tickid"
-                    date_filter_sub = "ex.tickid = :tickid"
-                else:
-                    date_filter = date_filter_sub = "1=0"
-            else:  # lt
-                rows = db.session.execute(
-                    text("SELECT DISTINCT tickid FROM event WHERE tickid IS NOT NULL ORDER BY timestamp DESC LIMIT 2")
-                ).fetchall()
-                if rows:
-                    last_tickid = rows[1][0] if len(rows) == 2 else rows[0][0]
-                    params["tickid"] = last_tickid
-                    date_filter = "e.tickid = :tickid"
-                    date_filter_sub = "ex.tickid = :tickid"
-                else:
-                    date_filter = date_filter_sub = "1=0"
-
-        # --- Zeitbasierte Perioden ---
-        else:
-            start = end = None
-            if period == "cw":  # current week
-                start = today - timedelta(days=today.weekday())
-                end = start + timedelta(days=6)
-            elif period == "lw":  # last week
-                end = today - timedelta(days=today.weekday() + 1)
-                start = end - timedelta(days=6)
-            elif period == "cm":  # current month
-                start = today.replace(day=1)
-                end = (start + relativedelta(months=1)) - timedelta(days=1)
-            elif period == "lm":  # last month
-                this_month_start = today.replace(day=1)
-                start = this_month_start - relativedelta(months=1)
-                end = this_month_start - timedelta(days=1)
-            elif period == "2m":  # last two full months
-                this_month_start = today.replace(day=1)
-                start = this_month_start - relativedelta(months=2)
-                end = this_month_start - timedelta(days=1)
-            elif period == "y":  # year-to-date
-                start = today.replace(month=1, day=1)
-                end = today.replace(month=12, day=31)
-            elif period == "cd":  # current day
-                start = end = today
-            elif period == "ld":  # last day
-                start = end = today - timedelta(days=1)
-
-            if start and end:
-                date_from = start.strftime('%Y-%m-%dT00:00:00Z')
-                date_to = end.strftime('%Y-%m-%dT23:59:59Z')
-                date_filter = f"e.timestamp BETWEEN '{date_from}' AND '{date_to}'"
-                date_filter_sub = f"ex.timestamp BETWEEN '{date_from}' AND '{date_to}'"
-            else:
-                date_filter = "1=1"
-                date_filter_sub = "1=1"
-
-        # --- Optionaler System-Filter ---
-        system_name = request.args.get("system_name")
-        if system_name:
-            date_filter += " AND e.starsystem = :system_name"
-            date_filter_sub += " AND ex.starsystem = :system_name"
-            params["system_name"] = system_name  # <- aus Request, nicht aus Tenant! :contentReference[oaicite:2]{index=2}
-
-        sql = f"""
-            SELECT e.cmdr,
-               c.squadron_rank AS rank,
-               SUM(CASE WHEN mb.event_id IS NOT NULL THEN mb.value ELSE 0 END) AS total_buy,
-               SUM(CASE WHEN ms.event_id IS NOT NULL THEN ms.value ELSE 0 END) AS total_sell,
-               CASE
-                   WHEN SUM(CASE WHEN ms.event_id IS NOT NULL THEN ms.value ELSE 0 END) > 0
-                   THEN SUM(CASE WHEN ms.event_id IS NOT NULL THEN ms.value ELSE 0 END)
-                        - SUM(CASE WHEN mb.event_id IS NOT NULL THEN mb.value ELSE 0 END)
-                   ELSE 0
-               END AS profit,
-               ROUND(
-                 CASE
-                   WHEN SUM(CASE WHEN ms.event_id IS NOT NULL THEN ms.value ELSE 0 END) > 0 AND
-                        SUM(CASE WHEN mb.event_id IS NOT NULL THEN mb.value ELSE 0 END) > 0
-                   THEN (SUM(CASE WHEN ms.event_id IS NOT NULL THEN ms.value ELSE 0 END)
-                         - SUM(CASE WHEN mb.event_id IS NOT NULL THEN mb.value ELSE 0 END)) * 100.0
-                        / SUM(CASE WHEN mb.event_id IS NOT NULL THEN mb.value ELSE 0 END)
-                   ELSE 0
-                 END, 2
-               ) AS profitability,
-
-               SUM(CASE WHEN mb.event_id IS NOT NULL THEN mb.count ELSE 0 END) +
-               SUM(CASE WHEN ms.event_id IS NOT NULL THEN ms.count ELSE 0 END) AS total_quantity,
-
-               SUM(CASE WHEN mb.event_id IS NOT NULL THEN mb.value ELSE 0 END) +
-               SUM(CASE WHEN ms.event_id IS NOT NULL THEN ms.value ELSE 0 END) AS total_volume,
-
-               (
-                 SELECT COUNT(*)
-                 FROM mission_completed_event mc
-                 JOIN event ex ON ex.id = mc.event_id
-                 WHERE ex.cmdr = e.cmdr AND {date_filter_sub}
-               ) AS missions_completed,
-
-               (
-                 SELECT COUNT(*)
-                 FROM mission_failed_event mf
-                 JOIN event ex ON ex.id = mf.event_id
-                 WHERE ex.cmdr = e.cmdr AND {date_filter_sub}
-               ) AS missions_failed,
-
-               (
-                 SELECT SUM(rv.amount)
-                 FROM redeem_voucher_event rv
-                 JOIN event ex ON ex.id = rv.event_id
-                 WHERE ex.cmdr = e.cmdr AND rv.type = 'bounty' AND {date_filter_sub}
-               ) AS bounty_vouchers,
-
-               (
-                 SELECT SUM(rv.amount)
-                 FROM redeem_voucher_event rv
-                 JOIN event ex ON ex.id = rv.event_id
-                 WHERE ex.cmdr = e.cmdr AND rv.type = 'CombatBond' AND {date_filter_sub}
-               ) AS combat_bonds,
-
-               (
-                 SELECT SUM(t.total_sales)
-                 FROM (
-                   SELECT se.earnings AS total_sales
-                   FROM sell_exploration_data_event se
-                   JOIN event ex ON ex.id = se.event_id
-                   WHERE ex.cmdr = e.cmdr AND {date_filter_sub}
-                   UNION ALL
-                   SELECT me.total_earnings AS total_sales
-                   FROM multi_sell_exploration_data_event me
-                   JOIN event ex ON ex.id = me.event_id
-                   WHERE ex.cmdr = e.cmdr AND {date_filter_sub}
-                 ) t
-               ) AS exploration_sales,
-
-               (
-                 SELECT SUM(LENGTH(mci.influence))
-                 FROM mission_completed_influence mci
-                 JOIN mission_completed_event mce ON mce.event_id = mci.mission_id
-                 JOIN event ex ON ex.id = mce.event_id
-                 WHERE ex.cmdr = e.cmdr
-                 AND mci.faction_name LIKE :faction_name_like
-                 AND {date_filter_sub}
-               ) AS influence_eic,
-
-               (
-                 SELECT SUM(cc.bounty)
-                 FROM commit_crime_event cc
-                 JOIN event ex ON ex.id = cc.event_id
-                 WHERE ex.cmdr = e.cmdr AND {date_filter_sub}
-               ) AS bounty_fines
-
-            FROM event e
-            LEFT JOIN cmdr c ON c.name = e.cmdr
-            LEFT JOIN market_buy_event mb ON mb.event_id = e.id
-            LEFT JOIN market_sell_event ms ON ms.event_id = e.id
-            WHERE e.cmdr IS NOT NULL AND {date_filter}
-            GROUP BY e.cmdr
-            ORDER BY e.cmdr
-        """
-
-        # LIKE-Parameter für EIC-Influence
-        params["faction_name_like"] = f"%{g.tenant['faction_name']}%"
-
-        result = db.session.execute(text(sql), params).fetchall()
-        data = [dict(row._mapping) for row in result]
-        return jsonify(data)
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/summary/recruits", methods=["GET"])
-@require_api_key
-def summary_recruits():
-    try:
-        sql = """
-              SELECT e.cmdr                                                      AS commander, \
-                     CASE WHEN COUNT(e.id) > 0 THEN 'Yes' ELSE 'No' END          AS has_data, \
-                     MAX(e.timestamp)                                            AS last_active, \
-                     CAST(julianday('now') - julianday(MIN(e.timestamp)) AS INT) AS days_since_join, \
-                     (SELECT COALESCE(SUM(mb.count), 0) + COALESCE((SELECT SUM(ms.count)
-                                                                    FROM market_sell_event ms
-                                                                             JOIN event e2 ON e2.id = ms.event_id
-                                                                    WHERE e2.cmdr = e.cmdr), 0)
-                      FROM market_buy_event mb
-                               JOIN event e1 ON e1.id = mb.event_id
-                      WHERE e1.cmdr = e.cmdr)                                    AS tonnage, \
-                     (SELECT COUNT(*)
-                      FROM mission_completed_event mc
-                               JOIN event ev ON ev.id = mc.event_id
-                      WHERE ev.cmdr = e.cmdr)                                    AS mission_count, \
-                     (SELECT SUM(rv.amount)
-                      FROM redeem_voucher_event rv
-                               JOIN event ev ON ev.id = rv.event_id
-                      WHERE ev.cmdr = e.cmdr \
-                        AND rv.type = 'bounty')                                  AS bounty_claims, \
-                     (SELECT SUM(total)
-                      FROM (SELECT se.earnings AS total \
-                            FROM sell_exploration_data_event se \
-                                     JOIN event ev ON ev.id = se.event_id \
-                            WHERE ev.cmdr = e.cmdr \
-                            UNION ALL \
-                            SELECT me.total_earnings AS total \
-                            FROM multi_sell_exploration_data_event me \
-                                     JOIN event ev ON ev.id = me.event_id \
-                            WHERE ev.cmdr = e.cmdr))                             AS exp_value, \
-                     (SELECT SUM(rv.amount)
-                      FROM redeem_voucher_event rv
-                               JOIN event ev ON ev.id = rv.event_id
-                      WHERE ev.cmdr = e.cmdr \
-                        AND rv.type = 'CombatBond')                              AS combat_bonds, \
-                     (SELECT SUM(cc.bounty)
-                      FROM commit_crime_event cc
-                               JOIN event ev ON ev.id = cc.event_id
-                      WHERE ev.cmdr = e.cmdr)                                    AS bounty_fines
-              FROM event e
-                       JOIN cmdr c ON c.name = e.cmdr
-              WHERE e.cmdr IS NOT NULL \
-                AND c.squadron_rank = 'Recruit'
-              GROUP BY e.cmdr
-              ORDER BY days_since_join ASC \
-              """
-        result = db.session.execute(text(sql)).fetchall()
-        data = [dict(row._mapping) for row in result]
-        return jsonify(data)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/discovery", methods=["GET"])
-def discovery():
-    """Discovery endpoint providing server capabilities and information"""
-    try:
-        discovery_response = {
-            "name": os.getenv("SERVER_NAME_PROD"),
-            "description": os.getenv("SERVER_DESCRIPTION_PROD"),
-            "url": os.getenv("SERVER_URL_PROD"),
-            "endpoints": {
-                "events": {
-                    "path": "/events",
-                    "minPeriod": "10",
-                    "maxBatch": "100"
-                },
-                "activities": {
-                    "path": "/activities",
-                    "minPeriod": "60",
-                    "maxBatch": "10"
-                },
-                "objectives": {
-                    "path": "/objectives",
-                    "minPeriod": "30",
-                    "maxBatch": "20"
-                }
-            },
-            "headers": {
-                "apikey": {
-                    "required": True,
-                    "description": "API key for authentication"
-                },
-                "apiversion": {
-                    "required": True,
-                    "description": "The version of the API in x.y.z notation",
-                    "current": API_VERSION
-                }
-            }
-        }
-
-        return jsonify(discovery_response), 200
-
-    except Exception as e:
-        logger.error(f"Discovery endpoint error: {str(e)}")
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/", methods=["GET"])
-def root():
-    """Root endpoint providing basic server information"""
-    try:
-        return jsonify({
-            "message": "VALK Flask Server is running",
-            "version": os.getenv("API_VERSION_PROD", "1.6.0"),
-            "name": os.getenv("SERVER_NAME_PROD", "VALK Flask Server"),
-            "endpoints": {
-                "discovery": "/discovery",
-                "api": "/api/"
-            }
-        }), 200
-    except Exception as e:
-        logger.error(f"Root endpoint error: {str(e)}")
-        return jsonify({"error": str(e)}), 500
-
-
+# Create Objective Endpoint
 @app.route("/api/objectives", methods=["POST"])
 @app.route("/objectives", methods=["POST"])
 @require_api_key
@@ -1542,6 +1612,7 @@ def create_objective():
         return jsonify({"error": str(e)}), 400
 
 
+# Get Objectives Endpoint
 @app.route("/objectives", methods=["GET"])
 @require_api_key
 def get_objectives():
@@ -1603,6 +1674,7 @@ def get_objectives():
         return jsonify({"error": str(e)}), 500
 
 
+# Streamlit-optimierter Objectives Endpoint
 @app.route("/api/objectives", methods=["GET"])
 @require_api_key
 def get_objectives_streamlit():
@@ -1671,6 +1743,7 @@ def get_objectives_streamlit():
         return jsonify({"error": str(e)}), 500
 
 
+# Delete Objective Endpoint
 @app.route('/api/objectives/<int:objective_id>', methods=['DELETE'])
 @app.route('/objectives/<int:objective_id>', methods=['DELETE'])
 @require_api_key
@@ -1697,8 +1770,7 @@ def delete_objective(objective_id):
         db.session.commit()
 
         logger.info(f"Objective {objective_id} and related data deleted successfully")
-        return jsonify({'message': f'Objective {objective_id} und zugehörige Daten gelöscht'}), 200
-
+        return jsonify({'message': f'Objective {objective_id} and related data deleted successfully', 'success': True}), 200
     except SQLAlchemyError as e:
         db.session.rollback()
         logger.error(f"Database error deleting objective {objective_id}: {str(e)}")
@@ -1709,6 +1781,11 @@ def delete_objective(objective_id):
         return jsonify({'error': str(e)}), 500
 
 
+##################################################################
+# Synthetic Conflict Zone Funktionen
+##################################################################
+
+# Space CZ Summary Endpoint
 @app.route("/api/syntheticcz-summary", methods=["GET"])
 @require_api_key
 def syntheticcz_summary():
@@ -1809,6 +1886,7 @@ def syntheticcz_summary():
         return jsonify({"error": str(e)}), 500
 
 
+# Ground CZ Summary Endpoint
 @app.route("/api/syntheticgroundcz-summary", methods=["GET"])
 @require_api_key
 def syntheticgroundcz_summary():
@@ -1910,6 +1988,11 @@ def syntheticgroundcz_summary():
         return jsonify({"error": str(e)}), 500
 
 
+##################################################################
+# System Funktionen
+##################################################################
+
+# System Summary Endpoint (EDDN)
 @app.route("/api/system-summary/", defaults={"system_name": None}, methods=["GET"])
 @app.route("/api/system-summary/<system_name>", methods=["GET"])
 @require_api_key
@@ -2158,6 +2241,73 @@ def system_summary(system_name):
         return jsonify({"error": str(e)}), 500
 
 
+# FSDJump-Factions-API Endpoint
+@app.route("/api/fsdjump-factions", methods=["GET"])
+@require_api_key
+def fsdjump_factions():
+    """
+    Gibt für jedes in den letzten 24h besuchte StarSystem (FSDJump, jeweils aktuellster Datensatz pro System)
+    eine Liste aller Factions im System mit deren aktuellen Daten zurück.
+    """
+    try:
+        since = datetime.utcnow() - timedelta(hours=24)
+        subq = (
+            db.session.query(
+                func.max(Event.id).label("id")
+            )
+            .filter(Event.event == "FSDJump")
+            .filter(Event.timestamp >= since)
+            .group_by(Event.starsystem)
+            .subquery()
+        )
+        events = (
+            db.session.query(Event)
+            .filter(Event.id.in_(subq))
+            .all()
+        )
+        result = []
+        for event in events:
+            raw = event.raw_json
+            if not raw:
+                continue
+            raw_json = None
+            try:
+                raw_json = ast.literal_eval(raw)
+            except Exception as ex:
+                logger.warning(f"Error parsing raw_json for Event {event.id}: {ex}")
+                continue
+            if not raw_json or "Factions" not in raw_json or not raw_json.get("StarSystem"):
+                continue
+            factions = []
+            for fac in raw_json["Factions"]:
+                factions.append({
+                    "Name": fac.get("Name"),
+                    "FactionState": fac.get("FactionState"),
+                    "Government": fac.get("Government"),
+                    "Influence": fac.get("Influence"),
+                    "Allegiance": fac.get("Allegiance"),
+                    "Happiness": fac.get("Happiness"),
+                    "MyReputation": fac.get("MyReputation"),
+                    "PendingStates": fac.get("PendingStates", []),
+                    "RecoveringStates": fac.get("RecoveringStates", []),
+                })
+            result.append({
+                "StarSystem": raw_json.get("StarSystem"),
+                "SystemAddress": raw_json.get("SystemAddress"),
+                "Timestamp": raw_json.get("timestamp"),
+                "Factions": factions
+            })
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"FSDJump-Factions-API Error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
+##################################################################
+# Protected Faction Funktionen
+##################################################################
+
+# Get Protected Faction Endpoints
 @app.route("/api/protected-faction", methods=["GET"])
 @require_api_key
 def get_protected_factions():
@@ -2175,6 +2325,7 @@ def get_protected_factions():
         return jsonify({"error": str(e)}), 500
 
 
+# Get Single Protected Faction Endpoint
 @app.route("/api/protected-faction/<int:faction_id>", methods=["GET"])
 @require_api_key
 def get_protected_faction(faction_id):
@@ -2194,6 +2345,7 @@ def get_protected_faction(faction_id):
         return jsonify({"error": str(e)}), 500
 
 
+# Create Protected Faction Endpoint
 @app.route("/api/protected-faction", methods=["POST"])
 @require_api_key
 def create_protected_faction():
@@ -2214,6 +2366,7 @@ def create_protected_faction():
         return jsonify({"error": str(e)}), 400
 
 
+# Update Protected Faction Endpoint
 @app.route("/api/protected-faction/<int:faction_id>", methods=["PUT"])
 @require_api_key
 def update_protected_faction(faction_id):
@@ -2235,6 +2388,7 @@ def update_protected_faction(faction_id):
         return jsonify({"error": str(e)}), 400
 
 
+# Delete Protected Faction Endpoint
 @app.route("/api/protected-faction/<int:faction_id>", methods=["DELETE"])
 @require_api_key
 def delete_protected_faction(faction_id):
@@ -2251,28 +2405,11 @@ def delete_protected_faction(faction_id):
         return jsonify({"error": str(e)}), 400
 
 
-@app.route("/api/protected-faction/systems", methods=["GET"])
-@require_api_key
-def get_all_system_names():
-    """
-    Gibt eine Liste aller Systemnamen aus der Tabelle eddn_system_info zurück.
-    Die Datenbank wird aus der .env-Variable EDDN_DATABASE gelesen.
-    """
-    try:
-        eddn_db_uri = os.getenv("EDDN_DATABASE")
-        if not eddn_db_uri:
-            return jsonify({"error": "EDDN_DATABASE not configured in .env"}), 500
+##################################################################
+# Hilfsfunktionen für Listen von Systemen, Factions, Powers
+##################################################################
 
-        engine = create_engine(eddn_db_uri)
-        with engine.connect() as conn:
-            rows = conn.execute(text("SELECT DISTINCT system_name FROM eddn_system_info ORDER BY system_name ASC")).fetchall()
-            system_names = [row[0] for row in rows if row[0]]
-        return jsonify(system_names)
-    except Exception as e:
-        logger.error(f"Fehler beim Abrufen der Systemnamen: {str(e)}")
-        return jsonify({"error": str(e)}), 500
-
-
+# List Unique System Names Endpoint
 @app.route("/api/lists/systems", methods=["GET"])
 @require_api_key
 def list_unique_system_names():
@@ -2292,6 +2429,7 @@ def list_unique_system_names():
         return jsonify({"error": str(e)}), 500
 
 
+# List Unique Controlling Factions Endpoint
 @app.route("/api/lists/controlling-factions", methods=["GET"])
 @require_api_key
 def list_unique_controlling_factions():
@@ -2311,6 +2449,7 @@ def list_unique_controlling_factions():
         return jsonify({"error": str(e)}), 500
 
 
+# List Unique Controlling Powers Endpoint
 @app.route("/api/lists/controlling-powers", methods=["GET"])
 @require_api_key
 def list_unique_controlling_powers():
@@ -2330,6 +2469,7 @@ def list_unique_controlling_powers():
         return jsonify({"error": str(e)}), 500
 
 
+# List Unique Powers Endpoint
 @app.route("/api/lists/factions", methods=["GET"])
 @require_api_key
 def list_unique_factions():
@@ -2349,42 +2489,25 @@ def list_unique_factions():
         return jsonify({"error": str(e)}), 500
 
 
-def initialize_all_tenant_databases():
-    """
-    Prüft beim Start für alle Tenants, ob die SQLite-DB-Datei existiert.
-    Falls nicht, wird sie samt Tabellenstruktur angelegt.
-    Zusätzlich wird die Tabelle protected_faction angelegt, falls sie fehlt.
-    """
-    from sqlalchemy.engine import make_url
-    from sqlalchemy import create_engine
-    for tenant in TENANTS:
-        db_uri = tenant.get("db_uri")
-        if not db_uri:
-            continue
-        url = make_url(db_uri)
-        if url.drivername == "sqlite" and url.database not in (None, "", ":memory:"):
-            sqlite_file_path = url.database
-            abs_path = os.path.abspath(sqlite_file_path)
-            dir_name = os.path.dirname(abs_path)
-            if dir_name and not os.path.exists(dir_name):
-                os.makedirs(dir_name, exist_ok=True)
-            if not os.path.exists(abs_path):
-                # Engine mit passenden connect_args für SQLite
-                engine = create_engine(db_uri, connect_args={"check_same_thread": False})
-                # Tabellenstruktur anlegen
-                with engine.begin() as conn:
-                    db.Model.metadata.create_all(bind=conn)
-                logger.info(f"Tenant-DB initialisiert: {abs_path}")
-        # Update existing Tenant DB
-        from update_db_tenant import ensure_protected_faction_table
-        ensure_protected_faction_table(db_uri)
-
-
+#####################################################################
+# App-Start
+#####################################################################
 if __name__ == "__main__":
-    print("Starting BGS Data API...")
+    import socket
+    from waitress import serve
+
+    print("Starting BGS Data API (Waitress, multi-port)...")
     with app.app_context():
         # Multi-Tenant: Prüfe und initialisiere alle Tenant-DBs und protected_faction-Tabellen
+        from databases import initialize_all_tenant_databases, update_all_tenant_databases
         initialize_all_tenant_databases()
+        update_all_tenant_databases()
+
+        # Debug: Alle Activity-Daten löschen
+        # ACHTUNG: Nur zu Testzwecken, auskommentiert lassen!
+        #from databases import delete_all_activity_data
+        #delete_all_activity_data()
+
         # Initialisiere den Tick-Wert
         get_latest_tickid()
 
@@ -2411,4 +2534,19 @@ if __name__ == "__main__":
     # Inara Cmdr Sync Scheduler starten
     from cmdr_sync_inara import start_cmdr_sync_scheduler
     start_cmdr_sync_scheduler(app, db)
-    app.run(host='0.0.0.0', port=5555, debug=False, use_reloader=False)
+
+    # Multi-Port Binding (5000 & 5555)
+    def _bind(host: str, port: int):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind((host, port))
+        s.listen(1024)
+        return s
+
+    sockets = [
+        _bind("0.0.0.0", 5000),
+        _bind("0.0.0.0", 5555),
+    ]
+
+    # Waitress starten
+    serve(app, sockets=sockets, threads=8)

@@ -22,6 +22,7 @@ formatter = logging.Formatter('%(asctime)s %(levelname)s:%(name)s:%(message)s')
 log_handler.setFormatter(formatter)
 logger.addHandler(log_handler)
 logger.setLevel(logging.INFO)
+logger.propagate = False  # <-- verhindert Weitergabe an Root-Logger (app.log)
 
 EDDN_URL = "tcp://eddn.edcd.io:9500"
 DB_URI = "sqlite:///db/bgs_data_eddn.db"

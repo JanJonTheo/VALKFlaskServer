@@ -76,6 +76,10 @@ class System(db.Model):
     address = db.Column(db.BigInteger, nullable=False)
     activity_id = db.Column(db.Integer, db.ForeignKey('activity.id'), nullable=False)
     factions = db.relationship('Faction', backref='system', cascade="all, delete-orphan")
+    # Neue Felder für Thargoid War
+    twkills = db.Column(db.Text)      # JSON-String für dict {"cyclops": 1, ...}
+    twsandr = db.Column(db.Text)      # JSON-String für dict {"damagedpods": 1, ...}
+    twreactivate = db.Column(db.Integer)
 
 class Faction(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -93,6 +97,13 @@ class Faction(db.Model):
     murdersspace = db.Column(db.Integer)
     tradebm = db.Column(db.Integer)
     system_id = db.Column(db.Integer, db.ForeignKey('system.id'), nullable=False)
+    # Neue Felder aus bgs_tally_openapi.json
+    stations = db.Column(db.Text)     # JSON-String für Liste von Station-Objekten
+    czground = db.Column(db.Text)     # JSON-String für dict
+    czspace = db.Column(db.Text)      # JSON-String für dict
+    tradebuy = db.Column(db.Text)     # JSON-String für dict
+    tradesell = db.Column(db.Text)    # JSON-String für dict
+    sandr = db.Column(db.Text)        # JSON-String für dict
 
 class FactionKillBondEvent(db.Model):
     id = db.Column(db.Integer, primary_key=True)

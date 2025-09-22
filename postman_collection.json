@@ -109,14 +109,14 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/activities?tick=current&cmdr=&system=&faction=",
+              "raw": "{{baseUrl}}/api/activities?period=current&cmdr=&system=&faction=",
               "host": ["{{baseUrl}}"],
               "path": ["api", "activities"],
               "query": [
                 {
-                  "key": "tick",
+                  "key": "period",
                   "value": "current",
-                  "description": "Filter: current, last, tickid"
+                  "description": "Filter: ct, lt, current, last, <tickid>"
                 },
                 {
                   "key": "cmdr",
@@ -136,7 +136,48 @@
               ]
             }
           },
-          "description": "Gibt alle Activities inkl. verknüpfter Systeme und Fraktionen zurück. Optional nach Tick, Cmdr, System und Fraktion filterbar."
+          "description": "Gibt alle Activities inkl. verknüpfter Systeme und Fraktionen zurück. Optional nach period (ct, lt, current, last, <tickid>), Cmdr, System und Fraktion filterbar."
+        },
+        {
+          "name": "System Activities Summary",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              },
+              {
+                "key": "apikey",
+                "value": "{{yourapikeyhere}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/activities/system-summary?period=ct&system=Sol&group=system",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "activities", "system-summary"],
+              "query": [
+                {
+                  "key": "period",
+                  "value": "ct",
+                  "description": "ct|lt|current|last|<tickid> (Tick-Auswahl)"
+                },
+                {
+                  "key": "system",
+                  "value": "Sol",
+                  "description": "Optional: Filter nach Systemname"
+                },
+                {
+                  "key": "group",
+                  "value": "system",
+                  "description": "Aggregationsebene: system (Standard), faction oder cmdr"
+                }
+              ]
+            }
+          },
+          "description": "Aggregiert Aktivitäten je System und Tick. Gibt Summen für alle relevanten Felder und CZ-Level zurück. Parameter: period, system, group. Für group kann jetzt auch 'cmdr' gewählt werden, um nach Commander zu aggregieren."
         }
       ]
     },

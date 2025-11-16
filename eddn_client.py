@@ -1,48 +1,803 @@
+import os
+import re
 import zmq
+import zlib
 import json
 import logging
 import logging.handlers
-import zlib
+import hashlib
 from datetime import datetime, timedelta
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from models_eddn import Base, EDDNMessage, Faction, Conflict, SystemInfo, Powerplay
-import os
 
-# Log-Verzeichnis sicherstellen
-LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
+from models_eddn import Base, EDDNMessage, Faction, Conflict, SystemInfo, Powerplay
+from models_eddn_mining import (
+    BaseMining, MiningRing, MiningHotspot,
+    MiningSession, ProspectedAsteroid, MiningRefinedEvent, MaterialCollectedEvent, SAASignalFound,
+    SAASignal, BiologicalSAASignal, BiologicalTaxonomyMap
+)
+
+# =============================================================================
+# Pfade & Logging
+# =============================================================================
+BASE_DIR = os.path.dirname(__file__)
+LOG_DIR = os.path.join(BASE_DIR, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
-# Logger mit RotatingFileHandler, max. 128 MB, 10 Backups
-logger = logging.getLogger("eddn_client")
-log_handler = logging.handlers.RotatingFileHandler(
-    os.path.join(LOG_DIR, "eddn_client.log"), maxBytes=128 * 1024 * 1024, backupCount=10
-)
-formatter = logging.Formatter('%(asctime)s %(levelname)s:%(name)s:%(message)s')
-log_handler.setFormatter(formatter)
-logger.addHandler(log_handler)
-logger.setLevel(logging.INFO)
-logger.propagate = False  # <-- verhindert Weitergabe an Root-Logger (app.log)
+def _make_logger(name, filename):
+    lg = logging.getLogger(name)
+    handler = logging.handlers.RotatingFileHandler(
+        os.path.join(LOG_DIR, filename),
+        maxBytes=128 * 1024 * 1024,
+        backupCount=10
+    )
+    fmt = logging.Formatter("%(asctime)s %(levelname)s:%(name)s:%(message)s")
+    handler.setFormatter(fmt)
+    lg.addHandler(handler)
+    lg.setLevel(logging.INFO)
+    lg.propagate = False
+    return lg
 
+# Drei getrennte Logger
+logger_core   = _make_logger("eddn_core",   "eddn_client.log")
+logger_bgs    = _make_logger("eddn_bgs",    "eddn_client_bgs.log")
+logger_mining = _make_logger("eddn_mining", "eddn_client_mining.log")
+
+# =============================================================================
+# Konfiguration
+# =============================================================================
 EDDN_URL = "tcp://eddn.edcd.io:9500"
-DB_URI = "sqlite:///db/bgs_data_eddn.db"
 
+# Kern-/BGS-DB
+DB_URI = "sqlite:///db/bgs_data_eddn.db"
+# Mining-DB
+MINING_DB_URI = "sqlite:///db/bgs_data_eddn_mining.db"
+
+# Hotspot-Erkennung: extrahiert "Platinum" aus "Platinum Hotspot"
+HOTSPOT_RX = re.compile(r"(?i)\b([A-Za-z ]+?)\s+Hotspot\b")
+
+# Generische SAA-Typen, die NICHT in eddn_mining_saa_signal landen sollen
+SKIP_SAA_GENERIC = {
+    "$SAA_SignalType_Geological;",
+    "$SAA_SignalType_Human;",
+    "$SAA_SignalType_Biological;",
+}
+
+
+# =============================================================================
+# Housekeeping
+# =============================================================================
+from sqlalchemy import text as _sqltext
 def cleanup_old_entries(session):
-    """Löscht alle EDDNMessage-Einträge älter als 24h."""
+    """
+    Löscht EDDNMessage-Einträge älter als 24h in der BGS-DB.
+    """
     cutoff = datetime.utcnow() - timedelta(hours=24)
     deleted = session.query(EDDNMessage).filter(EDDNMessage.timestamp < cutoff).delete()
     if deleted:
-        logger.info(f"{deleted} alte eddn_message-Einträge gelöscht.")
+        logger_bgs.info("[BGS] %s alte eddn_message-Einträge gelöscht (älter als 24h).", deleted)
 
+
+def defragment_database(engine, label=""):
+    """Defragmentiert die SQLite-Datenbank für optimale Performance."""
+    try:
+        if "sqlite" in str(engine.url):
+            logger_core.info("[DB] SQLite VACUUM %s gestartet ...", label or "")
+            with engine.connect() as conn:
+                conn.exec_driver_sql("VACUUM")
+            logger_core.info("[DB] SQLite VACUUM %s abgeschlossen.", label or "")
+    except Exception as ex:
+        logger_core.warning("[DB] VACUUM fehlgeschlagen (%s): %s", label, ex)
+
+
+# =============================================================================
+# Mining: Upsert-Helfer
+# =============================================================================
+def _upsert_ring(mining_session,
+                 system_name: str,
+                 body_name: str,
+                 ring_name: str,
+                 ring_type: str = None,
+                 inner_km: float = None,
+                 outer_km: float = None,
+                 reserve_level: str = None) -> MiningRing:
+    if not system_name or not ring_name:
+        logger_mining.debug("[MINING] Ring-Upsert übersprungen: system='%s', ring='%s'", system_name, ring_name)
+        return None
+
+    ring = (mining_session.query(MiningRing)
+            .filter(MiningRing.system_name == system_name,
+                    MiningRing.ring_name == ring_name)
+            .one_or_none())
+
+    if ring:
+        changed = False
+        if ring_type and ring.ring_type != ring_type:
+            ring.ring_type = ring_type; changed = True
+        if inner_km is not None and ring.inner_radius_km != inner_km:
+            ring.inner_radius_km = inner_km; changed = True
+        if outer_km is not None and ring.outer_radius_km != outer_km:
+            ring.outer_radius_km = outer_km; changed = True
+        if reserve_level and ring.reserve_level != reserve_level:
+            ring.reserve_level = reserve_level; changed = True
+        if changed:
+            ring.updated_at = datetime.utcnow()
+            logger_mining.info("[MINING] Ring aktualisiert: system='%s' ring='%s' type='%s' inner_km=%s outer_km=%s reserve='%s'",
+                               system_name, ring_name, ring_type, inner_km, outer_km, reserve_level)
+        return ring
+
+    ring = MiningRing(
+        system_name=system_name,
+        body_name=body_name or "",
+        ring_name=ring_name,
+        ring_type=ring_type,
+        inner_radius_km=inner_km,
+        outer_radius_km=outer_km,
+        reserve_level=reserve_level,
+        updated_at=datetime.utcnow(),
+    )
+    mining_session.add(ring)
+    mining_session.flush()  # ring.id verfügbar
+    logger_mining.info("[MINING] Neuer Ring gespeichert: system='%s' ring='%s' type='%s'", system_name, ring_name, ring_type)
+    return ring
+
+def _upsert_hotspot(mining_session,
+                    ring_id: str,
+                    commodity: str,
+                    count: int = None,
+                    source: str = "eddn_journal") -> MiningHotspot:
+    if not ring_id or not commodity:
+        logger_mining.debug("[MINING] Hotspot-Upsert übersprungen: ring_id='%s' commodity='%s'", ring_id, commodity)
+        return None
+
+    hs = (mining_session.query(MiningHotspot)
+          .filter(MiningHotspot.ring_id == ring_id,
+                  MiningHotspot.commodity == commodity)
+          .one_or_none())
+
+    now = datetime.utcnow()
+    if hs:
+        hs.last_seen_at = now
+        if hasattr(hs, "confidence") and (hs.confidence or 0) < 95:
+            hs.confidence = min(100, (hs.confidence or 0) + 5)
+        if isinstance(count, int):
+            hs.count = (hs.count or 0) + max(count, 1)
+        hs.active = 1
+        hs.updated_at = now
+        logger_mining.info("[MINING] Hotspot aktualisiert: ring_id='%s' commodity='%s' count=%s",
+                           ring_id, commodity, hs.count)
+        return hs
+
+    hs = MiningHotspot(
+        ring_id=ring_id,
+        commodity=commodity,
+        count=(count or 1),
+        source=source if "source" in MiningHotspot.__table__.columns else None,
+        first_seen_at=now,
+        last_seen_at=now,
+        confidence=60 if "confidence" in MiningHotspot.__table__.columns else None,
+        active=1,
+        updated_at=now,
+    )
+    mining_session.add(hs)
+    logger_mining.info("[MINING] Neuer Hotspot gespeichert: ring_id='%s' commodity='%s' count=%s",
+                       ring_id, commodity, count or 1)
+    return hs
+
+
+# =============================================================================
+# Mining Sessions & Parser
+# =============================================================================
+def _guess_ring_name_from_body(body_name: str) -> str:
+    """
+    Viele SAASignalsFound/Scan-Einträge verwenden bereits den Ring im BodyName (z. B. 'HIP 20277 1 A Ring').
+    Für Belt-Cluster übernehmen wir den BodyName als Ring-Name.
+    """
+    return body_name or ""
+
+
+def _ensure_mining_session(mining_session, cmdr: str, system_name: str, body_name: str = None,
+                           ring_name: str = None, ring_type: str = None, reserve_level: str = None) -> MiningSession:
+    """
+    Sucht eine laufende Session des Cmdr am Ort; wenn nicht vorhanden -> anlegen.
+    'Laufend' = Session, deren ended_at < now-45min ist NICHT (wir halten es simpel: aktualisieren immer dieselbe).
+    """
+    now = datetime.utcnow()
+    q = (mining_session.query(MiningSession)
+         .filter(MiningSession.cmdr == (cmdr or "Unknown"),
+                 MiningSession.system_name == (system_name or "Unknown"),
+                 MiningSession.body_name == (body_name or ""),
+                 MiningSession.ring_name == (ring_name or ""))
+         .order_by(MiningSession.started_at.desc()))
+    sess = q.first()
+
+    if sess:
+        # Kontext ggf. aktualisieren
+        changed = False
+        if ring_type and not sess.ring_type and "ring_type" in MiningSession.__table__.columns:
+            sess.ring_type = ring_type; changed = True
+        if reserve_level and not sess.reserve_level and "reserve_level" in MiningSession.__table__.columns:
+            sess.reserve_level = reserve_level; changed = True
+        sess.ended_at = now
+        sess.updated_at = now
+        if changed:
+            logger_mining.debug("[MINING] Session-Kontext aktualisiert: %s", sess.id)
+        return sess
+
+    # evtl. Ring referenzieren
+    ring_id = None
+    if ring_name:
+        ring = (mining_session.query(MiningRing)
+                .filter(MiningRing.system_name == system_name,
+                        MiningRing.ring_name == ring_name)
+                .one_or_none())
+        if ring:
+            ring_id = ring.id
+
+    sess = MiningSession(
+        cmdr=cmdr or "Unknown",
+        system_name=system_name or "Unknown",
+        body_name=body_name or "",
+        ring_name=ring_name or "",
+        ring_id=ring_id,
+        ring_type=ring_type if "ring_type" in MiningSession.__table__.columns else None,
+        reserve_level=reserve_level if "reserve_level" in MiningSession.__table__.columns else None,
+        started_at=now,
+        ended_at=now,
+        updated_at=now
+    )
+    mining_session.add(sess)
+    mining_session.flush()
+    logger_mining.info("[MINING] Session gestartet: cmdr='%s' system='%s' ring='%s'",
+                       cmdr, system_name, ring_name or body_name)
+    return sess
+
+
+def _parse_scan_for_rings(msg: dict, mining_session):
+    # Journal 'Scan': Ringe extrahieren
+    system_name = msg.get("StarSystem")
+    if not system_name:
+        logger_mining.debug("[MINING] Scan ohne StarSystem, ignoriert.")
+        return
+    body_name = msg.get("BodyName") or msg.get("Body") or ""
+    rings = msg.get("Rings") or []
+    reserve = msg.get("ReserveLevel")
+
+    for r in rings:
+        ring_name = r.get("Name") or ""
+        if not ring_name:
+            continue
+        ring_type = r.get("RingClass") or r.get("Type")
+        inner = r.get("InnerRad"); outer = r.get("OuterRad")
+        inner_km = (inner / 1000.0) if isinstance(inner, (int, float)) else None
+        outer_km = (outer / 1000.0) if isinstance(outer, (int, float)) else None
+        _upsert_ring(mining_session, system_name, body_name, ring_name, ring_type, inner_km, outer_km, reserve)
+
+
+def _sig_fingerprint(system_addr, body_id, ring_name, s_type, s_loc, s_count):
+    base = f"{system_addr}|{body_id}|{ring_name or ''}|{s_type or ''}|{s_loc or ''}|{int(s_count or 1)}"
+    return hashlib.sha256(base.encode("utf-8")).hexdigest()[:32]
+
+
+def _parse_saa_signals_for_hotspots(msg: dict, mining_session):
+    """
+    Journal 'SAASignalsFound':
+      1) Persistiert JEDES Signal (dedupliziert) in eddn_mining_saa_signal
+      2) Erkennt zusätzlich "* Hotspot" und pflegt MiningHotspot per Upsert
+      3) INFO-Logs unterscheiden NEU vs. EXISTIEREND
+    """
+    system_name = msg.get("StarSystem")
+    if not system_name:
+        logger_mining.debug("[MINING] SAASignalsFound ohne StarSystem, ignoriert.")
+        return
+
+    body_name = msg.get("BodyName") or msg.get("Body") or ""
+    body_id   = msg.get("BodyID")
+    sys_addr  = msg.get("SystemAddress")
+    ring_name_guess = _guess_ring_name_from_body(body_name)
+
+    # Ring registrieren (optional)
+    ring = _upsert_ring(mining_session, system_name, body_name, ring_name_guess, ring_type=None)
+
+    # Zeitstempel
+    try:
+        ts = datetime.fromisoformat(msg.get("timestamp").replace("Z", "+00:00")) if msg.get("timestamp") else datetime.utcnow()
+    except Exception:
+        ts = datetime.utcnow()
+
+    uploader_id = None  # falls du später den EDDN-Header durchreichst
+
+    signals = msg.get("Signals") or []
+    if not isinstance(signals, list):
+        logger_mining.debug("[MINING] SAASignalsFound: 'Signals' hat kein Listenformat, übersprungen.")
+        return
+
+    new_cnt = 0
+    exist_cnt = 0
+
+    for sig in signals:
+        s_type = sig.get("Type") or ""
+        s_loc = sig.get("Type_Localised") or ""
+        s_count = int(sig.get("Count") or 1)
+
+        # 1) Generische Typen NICHT speichern (nur für eddn_mining_saa_signal relevant)
+        if s_type in SKIP_SAA_GENERIC:
+            logger_mining.debug("[MINING] SAASignalsFound SKIPPED generic: type='%s' loc='%s'", s_type, s_loc)
+            # Hotspot-Erkennung ist hier ohnehin irrelevant; nächster Eintrag
+            continue
+
+        # 2) Fingerprint (stabil über Kernfelder)
+        fp = _sig_fingerprint(sys_addr, body_id, ring_name_guess, s_type, s_loc, s_count)
+
+        # --- UPSERT per natürlichem Schlüssel ---
+        existing = (mining_session.query(SAASignalFound)
+                    .filter(SAASignalFound.system_name == system_name,
+                            SAASignalFound.body_id == body_id,
+                            SAASignalFound.ring_name == (ring_name_guess or None),
+                            SAASignalFound.signal_type == s_type,
+                            SAASignalFound.signal_type_localised == s_loc,
+                            SAASignalFound.count == s_count)
+                    .one_or_none())
+
+        if existing:
+            prev_sightings = existing.sightings or 1
+            existing.last_seen_at = datetime.utcnow()
+            existing.sightings = prev_sightings + 1
+            existing.timestamp = ts
+            existing.raw_json = {"message": msg, "signal": sig}
+            existing.fingerprint = fp
+            if uploader_id and "uploader_id" in SAASignalFound.__table__.columns:
+                existing.uploader_id = uploader_id
+
+            exist_cnt += 1
+            logger_mining.info(
+                "[MINING] UPDATE: system='%s' body='%s' ring='%s' type='%s' localised='%s' count=%d sightings=%d",
+                system_name, body_name, ring_name_guess or "", s_type, s_loc or "", s_count, existing.sightings
+            )
+        else:
+            saa = SAASignalFound(
+                system_name=system_name,
+                body_name=body_name or None,
+                body_id=body_id,
+                ring_name=ring_name_guess or None,
+                signal_type=s_type,
+                signal_type_localised=s_loc,
+                count=s_count,
+                timestamp=ts,
+                raw_json={"message": msg, "signal": sig},
+                uploader_id=uploader_id if "uploader_id" in SAASignalFound.__table__.columns else None,
+                fingerprint=fp,
+                first_seen_at=datetime.utcnow(),
+                last_seen_at=datetime.utcnow(),
+                sightings=1
+            )
+            mining_session.add(saa)
+            new_cnt += 1
+            logger_mining.info(
+                "[MINING] INSERT: system='%s' body='%s' ring='%s' type='%s' localised='%s' count=%d",
+                system_name, body_name, ring_name_guess or "", s_type, s_loc or "", s_count
+            )
+
+        # 3) Hotspot-Upsert (nur bei "* Hotspot")
+        m = HOTSPOT_RX.search(s_type or "")
+        if m and ring:
+            commodity = m.group(1).strip().title()
+            _upsert_hotspot(mining_session, ring.id, commodity, count=s_count, source="eddn_journal")
+
+    logger_mining.info(
+        "[MINING] SAASignalsFound processed: system='%s' body='%s' total=%d new=%d existing=%d",
+        system_name, body_name, len(signals), new_cnt, exist_cnt
+    )
+
+
+def _parse_prospected_asteroid(msg: dict, mining_session):
+    """
+    Journal-Event: ProspectedAsteroid
+    Speichert den kompletten Event als ProspectedAsteroid (optional für spätere Analysen).
+    """
+    system_name = msg.get("StarSystem")
+    if not system_name:
+        logger_mining.debug("[MINING] ProspectedAsteroid ohne StarSystem, ignoriert.")
+        return
+
+    body_name = msg.get("BodyName") or msg.get("Body") or ""
+    ring_name = _guess_ring_name_from_body(body_name)
+    cmdr = msg.get("Commander") or msg.get("cmdr") or "Unknown"
+
+    # Timestamp
+    try:
+        ts = datetime.fromisoformat(msg.get("timestamp").replace("Z", "+00:00")) if msg.get("timestamp") else datetime.utcnow()
+    except Exception:
+        ts = datetime.utcnow()
+
+    # Session sicherstellen (kontextualisiert den Fundort)
+    sess = _ensure_mining_session(mining_session, cmdr, system_name, body_name, ring_name)
+
+    ev = ProspectedAsteroid(
+        session_id=sess.id if sess else None,
+        system_name=system_name,
+        body_name=body_name,
+        ring_name=ring_name,
+        content_raw=msg,
+        timestamp=ts,
+    )
+    mining_session.add(ev)
+    logger_mining.info("[MINING] ProspectedAsteroid gespeichert: system='%s' body='%s' ring='%s'",
+                       system_name, body_name, ring_name)
+
+
+def _parse_mining_refined(msg: dict, mining_session):
+    """
+    Journal-Event: MiningRefined
+    Beispiel (typisch):
+      { "event":"MiningRefined","Type":"Painite","timestamp":"...Z" }
+    Manche Journals nutzen zusätzlich 'Count'/'Quantity' – wird als amount übernommen, falls vorhanden.
+    """
+    system_name = msg.get("StarSystem")
+    if not system_name:
+        logger_mining.debug("[MINING] MiningRefined ohne StarSystem, ignoriert.")
+        return
+
+    body_name = msg.get("BodyName") or msg.get("Body") or ""
+    ring_name = _guess_ring_name_from_body(body_name)
+    cmdr = msg.get("Commander") or msg.get("cmdr") or "Unknown"
+
+    # Timestamp
+    try:
+        ts = datetime.fromisoformat(msg.get("timestamp").replace("Z", "+00:00")) if msg.get("timestamp") else datetime.utcnow()
+    except Exception:
+        ts = datetime.utcnow()
+
+    # Session sicherstellen
+    sess = _ensure_mining_session(mining_session, cmdr, system_name, body_name, ring_name)
+
+    commodity = msg.get("Type_Localised") or msg.get("Type") or "Unknown"
+    # amount aus möglichen Feldern ziehen
+    amount = None
+    for k in ("Count", "Quantity", "Amount"):
+        if isinstance(msg.get(k), (int, float)):
+            amount = float(msg.get(k))
+            break
+    if amount is None:
+        amount = 1.0
+
+    ev = MiningRefinedEvent(
+        session_id=sess.id if sess else None,
+        system_name=system_name,
+        body_name=body_name,
+        ring_name=ring_name,
+        commodity=commodity,
+        amount=amount,
+        timestamp=ts,
+        raw_json=msg
+    )
+    mining_session.add(ev)
+    logger_mining.info("[MINING] MiningRefined gespeichert: system='%s' body='%s' ring='%s' commodity='%s' amount=%s",
+                       system_name, body_name, ring_name, commodity, amount)
+
+
+def _parse_material_collected(msg: dict, mining_session):
+    """
+    Journal-Event: MaterialCollected
+    Beispiel:
+      { "event":"MaterialCollected","Category":"Raw","Name":"lowtemperaturediamond","Name_Localised":"Low Temperature Diamonds","Count":2, ... }
+    """
+    system_name = msg.get("StarSystem")
+    if not system_name:
+        logger_mining.debug("[MINING] MaterialCollected ohne StarSystem, ignoriert.")
+        return
+
+    body_name = msg.get("BodyName") or msg.get("Body") or ""
+    ring_name = _guess_ring_name_from_body(body_name)
+    cmdr = msg.get("Commander") or msg.get("cmdr") or "Unknown"
+
+    # Timestamp
+    try:
+        ts = datetime.fromisoformat(msg.get("timestamp").replace("Z", "+00:00")) if msg.get("timestamp") else datetime.utcnow()
+    except Exception:
+        ts = datetime.utcnow()
+
+    # Session sicherstellen
+    sess = _ensure_mining_session(mining_session, cmdr, system_name, body_name, ring_name)
+
+    category = msg.get("Category") or ""
+    name = msg.get("Name_Localised") or msg.get("Name") or "Unknown"
+    try:
+        count = int(msg.get("Count") or 1)
+    except Exception:
+        count = 1
+
+    ev = MaterialCollectedEvent(
+        session_id=sess.id if sess else None,
+        system_name=system_name,
+        body_name=body_name,
+        ring_name=ring_name,
+        category=category,
+        name=name,
+        count=count,
+        timestamp=ts,
+        raw_json=msg
+    )
+    mining_session.add(ev)
+    logger_mining.info("[MINING] MaterialCollected gespeichert: system='%s' body='%s' ring='%s' category='%s' name='%s' count=%d",
+                       system_name, body_name, ring_name, category, name, count)
+
+
+# =============================================================================
+# Biological: Upsert-Helfer (strukturierte SAA-Signale)
+# =============================================================================
+def _pretty_from_map(session, raw_key: str, kind: str) -> str:
+    if not raw_key:
+        return None
+    m = session.query(BiologicalTaxonomyMap).filter_by(key_raw=raw_key, kind=kind).first()
+    return m.pretty if m else None
+
+
+def _normalize_codex_label(raw_key: str) -> str:
+    """
+    Entfernt führendes '$', abschließendes ';', ersetzt '_' durch ' ', entfernt Suffixe wie '_Name'.
+    Beispiel: "$Codex_Ent_Bacterial_Genus_Name;" -> "Codex Ent Bacterial Genus"
+    """
+    if not raw_key:
+        return None
+    s = raw_key.strip()
+    if s.startswith("$"):
+        s = s[1:]
+    if s.endswith(";"):
+        s = s[:-1]
+    s = s.replace("_Name", "")
+    return s.replace("_", " ").strip() or raw_key
+
+
+def _classify_signal_group(obj: dict) -> tuple[str, str, str]:
+    """
+    Liefert (group, pretty_type, raw_code).
+    - group: Biological|Geological|Human|Mining
+    - pretty_type: hübsch (lokalisiert/normalisiert) NUR für Logs
+    - raw_code: ORIGINALER Code (z.B. "$SAA_SignalType_Biological;") – wird in eddn_saa_signal.signal_type gespeichert
+    """
+    raw_code = obj.get("Type") or obj.get("SignalName") or obj.get("USSType") or ""
+    type_local = obj.get("Type_Localised") or obj.get("SignalName_Localised") or ""
+
+    # Normalisierer: Klein, ohne Nicht-Alnum, ohne Spaces
+    import re as _re
+    def _norm(s: str) -> str:
+        return _re.sub(r"[^a-z0-9]+", "", (s or "").lower())
+
+    t_norm = _norm(raw_code)
+    l_norm = _norm(type_local)
+
+    group = "Human"
+    # Biological / Geological / Human sauber erkennen (auch bei "$SAA_SignalType_*;")
+    if any(k in t_norm or k in l_norm for k in ("biological", "saasignaltypebiological")):
+        group = "Biological"
+    elif any(k in t_norm or k in l_norm for k in ("geological", "saasignaltypegeological", "fumarole", "geyser")):
+        group = "Geological"
+    elif any(k in t_norm or k in l_norm for k in ("human", "saasignaltypehuman")):
+        group = "Human"
+
+    # Mining-Heuristik: auch zusammengezogene Schreibweisen erkennen
+    mining_keys = (
+        "tritium","painite","monazite","alexandrite","lowtemperaturediamond",
+        "ltd","benitoite","musgravite","rhodplumsite","serendibite","opal","platinum"
+    )
+    if any(k in t_norm or k in l_norm for k in mining_keys):
+        group = "Mining"
+
+    pretty = type_local or _normalize_codex_label(raw_code) or "Unknown"
+    return group, pretty, raw_code
+
+
+def _expand_bio_signals_from_genuses(msg: dict) -> list[dict]:
+    """
+    Erzeugt pro Genus ein 'synthetisches' Signalobjekt.
+    - signal_type bleibt der RAW-Code (z.B. "$SAA_SignalType_Biological;")
+    - Count wird fair aufgeteilt (mind. 1)
+    """
+    signals = msg.get("Signals") or []
+    if not signals or not isinstance(signals, list):
+        return []
+
+    genuses = msg.get("Genuses") or []
+    if not genuses:
+        return []  # nichts zu expandieren
+
+    # Finde ein 'Biological'-Signal (RAW oder lokalisiert)
+    bio_sig = None
+    for s in signals:
+        t = s.get("Type") or ""
+        tl = (s.get("Type_Localised") or "").strip().lower()
+        if t == "$SAA_SignalType_Biological;" or "saa signaltype biological" in tl:
+            bio_sig = s
+            break
+    if not bio_sig:
+        return []
+
+    total = int(bio_sig.get("Count") or len(genuses) or 1)
+    per = max(1, total // max(1, len(genuses)))
+
+    out = []
+    for g in genuses:
+        # RAW Genus-Key (z.B. "$Codex_Ent_Tussocks_Genus_Name;")
+        graw = g.get("Genus")
+        if not graw:
+            continue
+        sg = dict(bio_sig)  # Kopie
+        sg["Genus"] = graw
+        sg["Count"] = per
+        out.append(sg)
+    return out
+
+
+def _upsert_saa_signal(session, eddn_message_id, base_fields: dict, signal_obj: dict, seen_at: datetime):
+    # -> (group, pretty_label, raw_code)
+    group, pretty, raw_code = _classify_signal_group(signal_obj)
+
+    # WICHTIG: In eddn_saa_signal.signal_type speichern wir RAW!
+    key = dict(
+        system_name=base_fields["system_name"],
+        body_name=base_fields["body_name"],
+        latitude=base_fields.get("latitude"),
+        longitude=base_fields.get("longitude"),
+        signal_group=group,
+        signal_type=raw_code  # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+    )
+
+    count = int(signal_obj.get("Count") or 0)
+
+    row = session.query(SAASignal).filter_by(**key).first()
+    if row:
+        row.sightings = (row.sightings or 0) + 1
+        if count:
+            row.count = count
+        row.last_seen_at = seen_at
+        row.eddn_message_id = eddn_message_id
+        row.raw_json = base_fields.get("raw_json")
+        row.updated_at = datetime.utcnow()
+        session.add(row)
+        session.flush()
+    else:
+        row = SAASignal(
+            **key,
+            count=count,
+            sightings=1,
+            first_seen_at=seen_at,
+            last_seen_at=seen_at,
+            eddn_message_id=eddn_message_id,
+            raw_json=base_fields.get("raw_json"),
+            updated_at=datetime.utcnow()
+        )
+        session.add(row)
+        session.flush()
+
+    # ---------- Biological-Details ----------
+    if group == "Biological":
+        genus_raw = signal_obj.get("Genus") or signal_obj.get("genus")
+        species_raw = signal_obj.get("Species") or signal_obj.get("species")
+        variant_raw = signal_obj.get("Variant") or signal_obj.get("variant")
+
+        genus_local = signal_obj.get("Genus_Localised")
+        species_local = signal_obj.get("Species_Localised")
+        variant_local = signal_obj.get("Variant_Localised")
+
+        genus = _pretty_from_map(session, genus_raw, "genus") or genus_local or _normalize_codex_label(genus_raw)
+        species = _pretty_from_map(session, species_raw, "species") or species_local or _normalize_codex_label(
+            species_raw)
+        variant = _pretty_from_map(session, variant_raw, "variant") or variant_local or _normalize_codex_label(
+            variant_raw)
+
+        bio = session.query(BiologicalSAASignal).filter_by(saa_signal_id=row.id).first()
+        if bio:
+            # Update
+            prev = dict(genus_raw=bio.genus_raw, species_raw=bio.species_raw, variant_raw=bio.variant_raw,
+                        genus=bio.genus, species=bio.species, variant=bio.variant)
+
+            bio.genus_raw, bio.species_raw, bio.variant_raw = genus_raw, species_raw, variant_raw
+            bio.genus, bio.species, bio.variant = genus, species, variant
+            bio.updated_at = datetime.utcnow()
+            session.add(bio)
+
+            logger_mining.info(
+                "[EXOBIO] UPDATE: system='%s' body='%s' raw_type='%s' "
+                "genus_raw='%s' species_raw='%s' variant_raw='%s'",
+                base_fields.get("system_name"), base_fields.get("body_name"), raw_code,
+                genus_raw, species_raw, variant_raw
+            )
+        else:
+            # Insert
+            bio = BiologicalSAASignal(
+                saa_signal_id=row.id,
+                genus_raw=genus_raw, species_raw=species_raw, variant_raw=variant_raw,
+                genus=genus, species=species, variant=variant,
+                updated_at=datetime.utcnow()
+            )
+            session.add(bio)
+
+            logger_mining.info(
+                "[EXOBIO] INSERT: system='%s' body='%s' raw_type='%s' "
+                "genus_raw='%s' species_raw='%s' variant_raw='%s'",
+                base_fields.get("system_name"), base_fields.get("body_name"), raw_code,
+                genus_raw, species_raw, variant_raw
+            )
+
+    return row
+
+
+def _handle_saa_signals_found(session, msg: dict, eddn_message_id: str):
+    """
+    Persistiert strukturierte SAA-Signale (inkl. Biological-Details).
+    - Speichert RAW signal_type (z.B. "$SAA_SignalType_Biological;")
+    - Fächert Biological-Genuses in einzelne Signals auf
+    """
+    sysname = msg.get("SystemName") or msg.get("StarSystem") or ""
+    body = msg.get("BodyName") or ""
+    lat = msg.get("Latitude")
+    lon = msg.get("Longitude")
+    seen_at = datetime.utcnow()
+
+    base_fields = {
+        "system_name": sysname,
+        "body_name": body,
+        "latitude": lat, "longitude": lon,
+        "raw_json": msg
+    }
+
+    # Original-Signale + ggf. expandierte Biological-Genuses zusammenführen
+    signals = msg.get("Signals") or []
+    if not signals:
+        s = msg.get("Signal")
+        if isinstance(s, dict):
+            signals = [s]
+
+    expanded = _expand_bio_signals_from_genuses(msg)
+    if expanded:
+        # entferne das generische Biological-Signal (falls vorhanden), ersetze durch expandierte
+        signals = [s for s in signals if (s.get("Type") != "$SAA_SignalType_Biological;" and
+                                          (s.get("Type_Localised") or "").strip().lower() != "saa signaltype biological")]
+        signals.extend(expanded)
+
+    types_seen = []
+    for s in signals:
+        try:
+            grp, typ_pretty, raw_code = _classify_signal_group(s)  # raw_code ist originaler Type
+        except Exception:
+            grp, typ_pretty, raw_code = "Unknown", (s.get("Type_Localised") or s.get("Type") or "Unknown"), (s.get("Type") or "")
+
+        types_seen.append(raw_code or typ_pretty)
+
+        try:
+            _upsert_saa_signal(session, eddn_message_id, base_fields, s, seen_at)
+            logger_mining.debug(
+                "[SIGNAL] Upsert OK: system='%s' body='%s' group='%s' raw_type='%s' pretty='%s' count=%s genus=%s",
+                sysname, body, grp, raw_code, typ_pretty, s.get("Count") or 0, s.get("Genus")
+            )
+        except Exception as ex:
+            logger_mining.exception(
+                "[SIGNAL] Upsert FAILED: system='%s' body='%s' group='%s' raw_type='%s' err=%s",
+                sysname, body, grp, raw_code, ex
+            )
+
+    unique_types = ", ".join(sorted(set(t for t in types_seen if t)))
+    logger_mining.info(
+        "[SIGNAL] Parsed SAASignalsFound (structured): %s | %s (%.5f, %.5f) | %d signals | raw_types=[%s]",
+        sysname, body, (lat or 0.0), (lon or 0.0), len(signals), unique_types or "n/a"
+    )
+
+
+# =============================================================================
+# BGS: bestehende System-bezogene Speicherung (mit Logging)
+# =============================================================================
 def save_system_related_data(session, data, eddn_message_id):
     msg = data.get("message", {})
     system_name = msg.get("StarSystem")
     now = datetime.utcnow()
 
     if not system_name:
+        logger_bgs.debug("[BGS] System-bezogene Speicherung übersprungen (kein StarSystem).")
         return
 
-    # SystemInfo: Remove old, insert new
+    # SystemInfo (Replace-Strategy)
     session.query(SystemInfo).filter_by(system_name=system_name).delete()
     sysinfo = SystemInfo(
         eddn_message_id=eddn_message_id,
@@ -56,8 +811,10 @@ def save_system_related_data(session, data, eddn_message_id):
         updated_at=now
     )
     session.add(sysinfo)
+    logger_bgs.info("[BGS] SystemInfo gespeichert: system='%s' faction='%s' power='%s' pop=%s",
+                    system_name, sysinfo.controlling_faction, sysinfo.controlling_power, sysinfo.population)
 
-    # Factions: Remove old, insert new only if data present
+    # Factions
     session.query(Faction).filter_by(system_name=system_name).delete()
     factions = msg.get("Factions", [])
     if factions:
@@ -74,40 +831,38 @@ def save_system_related_data(session, data, eddn_message_id):
                 updated_at=now
             )
             session.add(f)
+        logger_bgs.info("[BGS] %d Faction(s) gespeichert für system='%s'.", len(factions), system_name)
 
-    # Conflicts: Remove old, insert new only if data present
+    # Conflicts
     session.query(Conflict).filter_by(system_name=system_name).delete()
     conflicts = msg.get("Conflicts", [])
     if conflicts:
         for conflict in conflicts:
-            stake1 = conflict.get("Faction1", {}).get("Stake")
-            stake2 = conflict.get("Faction2", {}).get("Stake")
-            won_days1 = conflict.get("Faction1", {}).get("WonDays")
-            won_days2 = conflict.get("Faction2", {}).get("WonDays")
-
             c = Conflict(
                 eddn_message_id=eddn_message_id,
                 system_name=system_name,
                 faction1=conflict.get("Faction1", {}).get("Name"),
                 faction2=conflict.get("Faction2", {}).get("Name"),
-                stake1=stake1,
-                stake2=stake2,
-                won_days1=won_days1,
-                won_days2=won_days2,
+                stake1=conflict.get("Faction1", {}).get("Stake"),
+                stake2=conflict.get("Faction2", {}).get("Stake"),
+                won_days1=conflict.get("Faction1", {}).get("WonDays"),
+                won_days2=conflict.get("Faction2", {}).get("WonDays"),
                 status=conflict.get("Status"),
                 war_type=conflict.get("WarType"),
                 updated_at=now
             )
             session.add(c)
+        logger_bgs.info("[BGS] %d Conflict(s) gespeichert für system='%s'.", len(conflicts), system_name)
 
-    # Powerplay: Remove old, insert new only if data present
+    # Powerplay
     session.query(Powerplay).filter_by(system_name=system_name).delete()
     has_powerplay = "Powers" in msg or "PowerplayState" in msg
     if has_powerplay and (msg.get("Powers") or msg.get("PowerplayState")):
         p = Powerplay(
             eddn_message_id=eddn_message_id,
             system_name=system_name,
-            power=msg.get("Powers") if isinstance(msg.get("Powers"), list) else [msg.get("Powers")] if msg.get("Powers") else [],
+            power=msg.get("Powers") if isinstance(msg.get("Powers"), list)
+                  else [msg.get("Powers")] if msg.get("Powers") else [],
             powerplay_state=msg.get("PowerplayState"),
             control_progress=msg.get("PowerplayStateControlProgress"),
             reinforcement=msg.get("PowerplayStateReinforcement"),
@@ -115,78 +870,141 @@ def save_system_related_data(session, data, eddn_message_id):
             updated_at=now
         )
         session.add(p)
+        logger_bgs.info("[BGS] Powerplay gespeichert: system='%s' state='%s' powers=%s",
+                        system_name, p.powerplay_state, p.power)
 
-def defragment_database(engine):
-    """Defragmentiert die SQLite-Datenbank für optimale Performance."""
-    if "sqlite" in str(engine.url):
-        logger.info("SQLite-Datenbank starte Defragmentierung (VACUUM)...")
-        with engine.connect() as conn:
-            conn.exec_driver_sql("VACUUM")
-        logger.info("SQLite-Datenbank wurde defragmentiert (VACUUM ausgeführt).")
 
+# =============================================================================
+# Main-Loop
+# =============================================================================
 def main():
-    # DB-Session vorbereiten
+    # 1) Engines & Sessions
     engine = create_engine(DB_URI, connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine)
     session = Session()
 
-    # Defragmentierung beim Start
-    defragment_database(engine)
+    mining_engine = create_engine(MINING_DB_URI, connect_args={"check_same_thread": False})
+    BaseMining.metadata.create_all(mining_engine)
+    MiningSessionMaker = sessionmaker(bind=mining_engine)
+    mining_session = MiningSessionMaker()
 
-    # ZMQ-Subscriber initialisieren
+    # VACUUM beim Start
+    defragment_database(engine, "BGS")
+    defragment_database(mining_engine, "MINING")
+
+    # 2) ZMQ Subscriber
     context = zmq.Context()
     socket = context.socket(zmq.SUB)
     socket.connect(EDDN_URL)
     socket.setsockopt_string(zmq.SUBSCRIBE, "")
 
-    logger.info("EDDN Client gestartet, wartet auf Nachrichten...")
+    logger_core.info("[CORE] EDDN Client gestartet, wartet auf Nachrichten...]")
 
     last_cleanup = datetime.utcnow()
-    last_vacuum = datetime.utcnow()
+    last_vacuum_bgs = datetime.utcnow()
+    last_vacuum_mining = datetime.utcnow()
 
     try:
         while True:
-            msg = socket.recv()
+            raw = socket.recv()
             try:
                 # EDDN-Nachrichten sind zlib-komprimiert
-                decompressed = zlib.decompress(msg)
-                data = json.loads(decompressed.decode("utf-8"))
+                data = json.loads(zlib.decompress(raw).decode("utf-8"))
+                msg = data.get("message", {}) or {}
+                event = msg.get("event")
+                schema_ref = data.get("$schemaRef", "")
+                header_uploader = (data.get("header") or {}).get("uploaderID")
+                logger_core.info("[CORE] EDDN Nachricht empfangen: event='%s' schema='%s'", event, schema_ref)
 
-                # Nur Location und FSDJump speichern
-                message_type = data.get("message", {}).get("event", None)
-                if message_type not in ("Location", "FSDJump"):
+                # --- MINING: alle relevanten Events zuerst verarbeiten ---
+                if event == "Scan":
+                    _parse_scan_for_rings(msg, mining_session)
+
+                if event == "SAASignalsFound":
+                    # 1) Roh-Erfassung + Hotspot-Erkennung
+                    _parse_saa_signals_for_hotspots(msg, mining_session)
+                    # 2) Strukturierte SAA-Daten inkl. Biological-Parsing
+                    _handle_saa_signals_found(mining_session, msg, header_uploader)
+                    mining_session.commit()
+                    # für SAASignalsFound persistieren wir nichts in der BGS-DB -> continue
+                    logger_core.info("[CORE] SAASignalsFound verarbeitet (mining-db committed).")
                     continue
 
-                # EDDNMessage-Objekt erzeugen und speichern
+                if event == "ProspectedAsteroid":
+                    _parse_prospected_asteroid(msg, mining_session)
+                    mining_session.commit()
+                    continue
+
+                if event == "MiningRefined":
+                    _parse_mining_refined(msg, mining_session)
+                    mining_session.commit()
+                    continue
+
+                if event == "MaterialCollected":
+                    _parse_material_collected(msg, mining_session)
+                    mining_session.commit()
+                    continue
+
+                # --- BGS: nur Location/FSDJump persistieren (wie gehabt) ---
+                if event not in ("Location", "FSDJump"):
+                    # Sichtbarer Kurz-Log für alle anderen Events
+                    logger_core.info("[CORE] Event (non-BGS persist): '%s' | System='%s' | Cmdr='%s'",
+                                     event, msg.get("StarSystem"), msg.get("Commander") or msg.get("cmdr"))
+                    # Kein BGS-Commit nötig; Mining-Pfade oben committen bereits.
+                    continue
+
+                # BGS-Message
                 eddn_msg = EDDNMessage.from_eddn(data)
                 session.add(eddn_msg)
-                session.flush()  # Damit eddn_msg.id verfügbar ist
+                session.flush()  # eddn_msg.id verfügbar
 
-                # Systemdaten extrahieren und speichern, eddn_message_id übergeben
                 save_system_related_data(session, data, eddn_msg.id)
 
+                # Commits
                 session.commit()
-                #logger.info(f"EDDN-Nachricht gespeichert: {eddn_msg.schema_ref} @ {eddn_msg.timestamp}")
+                logger_core.debug("[CORE] Transaktionen committed (BGS).")
 
-                # Bereinige alte Einträge alle 100 Nachrichten oder alle 10 Minuten
-                if (datetime.utcnow() - last_cleanup).total_seconds() > 600 or session.query(EDDNMessage).count() % 100 == 0:
+                # Housekeeping
+                if (datetime.utcnow() - last_cleanup).total_seconds() > 600 \
+                   or session.query(EDDNMessage).count() % 100 == 0:
                     cleanup_old_entries(session)
                     last_cleanup = datetime.utcnow()
 
-                # Defragmentiere die Datenbank alle 12 Stunden
-                if (datetime.utcnow() - last_vacuum).total_seconds() > 43200:
-                    defragment_database(engine)
-                    last_vacuum = datetime.utcnow()
+                if (datetime.utcnow() - last_vacuum_bgs).total_seconds() > 43200:
+                    defragment_database(engine, "BGS")
+                    last_vacuum_bgs = datetime.utcnow()
+
+                if (datetime.utcnow() - last_vacuum_mining).total_seconds() > 43200:
+                    defragment_database(mining_engine, "MINING")
+                    last_vacuum_mining = datetime.utcnow()
+
             except Exception as ex:
-                logger.error(f"Fehler beim Verarbeiten/Speichern einer Nachricht: {ex}")
-                session.rollback()
+                logger_core.exception("[CORE] Fehler beim Verarbeiten/Speichern einer Nachricht: %s", ex)
+                try:
+                    session.rollback()
+                except Exception:
+                    pass
+                try:
+                    mining_session.rollback()
+                except Exception:
+                    pass
+
+
     except KeyboardInterrupt:
-        logger.info("EDDN Client beendet.")
+        logger_core.info("[CORE] EDDN Client beendet (KeyboardInterrupt).")
     finally:
-        session.close()
-        socket.close()
-        context.term()
+        for obj in (session, mining_session):
+            try:
+                obj.close()
+            except Exception:
+                pass
+        try:
+            socket.close()
+            context.term()
+        except Exception:
+            pass
+
 
 if __name__ == "__main__":
     main()

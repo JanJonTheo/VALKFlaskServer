@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify, g
 from sqlalchemy.exc import OperationalError
-from sqlalchemy import create_engine, text, func, desc
+from sqlalchemy import create_engine, text, func, desc, event
 from sqlalchemy.orm import scoped_session, sessionmaker
 from sqlalchemy.engine import make_url
 from models import *
@@ -17,6 +17,8 @@ import os
 import json
 import ast
 from activities import activities_bp
+from mining import mining_bp
+from sysmap import sysmap_bp
 
 # Lade Umgebungsvariablen aus .env
 from dotenv import load_dotenv
@@ -51,6 +53,9 @@ last_known_tickid = {"value": None}
 
 app = Flask(__name__)
 app.register_blueprint(activities_bp)
+app.register_blueprint(mining_bp)
+app.register_blueprint(sysmap_bp)
+
 
 ##################################################################
 # Hilfsfunktionen für VALK API
@@ -100,9 +105,24 @@ def set_tenant_db_config(tenant):
         engine_changed = not hasattr(g, "tenant_db_engine") or getattr(g, "tenant_db_uri", None) != db_uri
 
         if engine_changed:
-            # Für SQLite empfehlenswerte connect_args setzen
-            connect_args = {"check_same_thread": False} if is_sqlite else {}
+            # Für SQLite: Threads erlauben + längeres Timeout
+            if is_sqlite:
+                connect_args = {"check_same_thread": False, "timeout": 30}
+            else:
+                connect_args = {}
+
             engine = create_engine(db_uri, connect_args=connect_args)
+
+            # SQLite-spezifische PRAGMAs setzen (WAL-Modus, weniger striktes synchronous)
+            if is_sqlite:
+                def _set_sqlite_pragma(dbapi_connection, connection_record):
+                    cursor = dbapi_connection.cursor()
+                    cursor.execute("PRAGMA journal_mode=WAL;")
+                    cursor.execute("PRAGMA synchronous=NORMAL;")
+                    cursor.close()
+
+                event.listen(engine, "connect", _set_sqlite_pragma)
+
             db.session = scoped_session(sessionmaker(bind=engine))
             g.tenant_db_engine = engine
             g.tenant_db_uri = db_uri
@@ -119,6 +139,27 @@ def set_tenant_db_config(tenant):
         # Generischer Fallback für unerwartete Fehler
         logger.exception(f"Fehler beim Setzen der Tenant-DB-Konfiguration für {db_uri}: {e}")
         g.tenant_db_error = str(e)
+
+
+# Commit mit Retry bei 'database is locked'
+def commit_with_retry(session, retries: int = 3, delay: float = 0.5):
+    """
+    Führt session.commit() mit einfachem Retry bei 'database is locked' aus.
+    Das ist vor allem für parallele Writes auf SQLite hilfreich.
+    """
+    import time
+    for attempt in range(retries):
+        try:
+            session.commit()
+            return
+        except OperationalError as e:
+            msg = str(e).lower()
+            if "database is locked" in msg and attempt < retries - 1:
+                session.rollback()
+                time.sleep(delay)
+                continue
+            # andere Fehler oder letzter Versuch -> weiterwerfen
+            raise
 
 
 # Request teardown: Session entfernen
@@ -335,7 +376,7 @@ def post_events():
                     station_faction_name=event_dict.get("station_faction_name")
                 ))
 
-        db.session.commit()
+        commit_with_retry(db.session)
 
         # Detect tickid change
         incoming_tickids = {event.get("tickid") for event in events_data if event.get("tickid")}
@@ -1220,6 +1261,97 @@ def query_table(tablename):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# Neue Route: Lösche einen einzelnen Cmdr und alle relevanten Daten
+@app.route("/api/cmdr/<string:name>", methods=["DELETE"])
+@require_api_key
+def delete_cmdr(name):
+    """
+    Löscht alle Datensätze, die zu einem Cmdr gehören:
+     - Events des Cmdr und alle event-abhängigen Tabellen (market_*, mission_*, redeem_voucher, commit_crime, ...)
+     - MissionCompletedInfluence für betroffene Missionen
+     - SyntheticCZ / SyntheticGroundCZ (nach event_id und direkt nach cmdr)
+     - Activities des Cmdr (cascade löscht System/Faction)
+     - Der Eintrag in der Tabelle cmdr
+    Rückgabe: JSON mit Zählern der gelöschten Einträge.
+    """
+    try:
+        target = (name or "").strip()
+        if not target:
+            return jsonify({"error": "No cmdr name provided"}), 400
+        name_lower = target.lower()
+
+        # Sammle Event-IDs des Cmdr (case-insensitive)
+        event_rows = db.session.query(Event.id).filter(func.lower(Event.cmdr) == name_lower).all()
+        event_ids = [r[0] for r in event_rows] if event_rows else []
+
+        deleted_counts = {
+            "market_buy": 0,
+            "market_sell": 0,
+            "mission_completed": 0,
+            "mission_influence": 0,
+            "mission_failed": 0,
+            "faction_kill": 0,
+            "multi_sell_exploration": 0,
+            "redeem_voucher": 0,
+            "sell_exploration": 0,
+            "commit_crime": 0,
+            "syntheticcz_by_event": 0,
+            "syntheticgroundcz_by_event": 0,
+            "syntheticcz_by_cmdr": 0,
+            "syntheticgroundcz_by_cmdr": 0,
+            "events": 0,
+            "activities": 0,
+            "cmdr": 0
+        }
+
+        # Falls Events vorhanden: zuerst event-abhängige Tabellen löschen
+        if event_ids:
+            # MissionCompletedInfluence: mission_ids ermitteln (mission_completed_event.id)
+            mission_id_rows = db.session.query(MissionCompletedEvent.id).filter(MissionCompletedEvent.event_id.in_(event_ids)).all()
+            mission_ids = [r[0] for r in mission_id_rows] if mission_id_rows else []
+
+            if mission_ids:
+                deleted_counts["mission_influence"] = db.session.query(MissionCompletedInfluence).filter(MissionCompletedInfluence.mission_id.in_(mission_ids)).delete(synchronize_session=False)
+
+            deleted_counts["market_buy"] = db.session.query(MarketBuyEvent).filter(MarketBuyEvent.event_id.in_(event_ids)).delete(synchronize_session=False)
+            deleted_counts["market_sell"] = db.session.query(MarketSellEvent).filter(MarketSellEvent.event_id.in_(event_ids)).delete(synchronize_session=False)
+            deleted_counts["mission_completed"] = db.session.query(MissionCompletedEvent).filter(MissionCompletedEvent.event_id.in_(event_ids)).delete(synchronize_session=False)
+            deleted_counts["mission_failed"] = db.session.query(MissionFailedEvent).filter(MissionFailedEvent.event_id.in_(event_ids)).delete(synchronize_session=False)
+            deleted_counts["faction_kill"] = db.session.query(FactionKillBondEvent).filter(FactionKillBondEvent.event_id.in_(event_ids)).delete(synchronize_session=False)
+            deleted_counts["multi_sell_exploration"] = db.session.query(MultiSellExplorationDataEvent).filter(MultiSellExplorationDataEvent.event_id.in_(event_ids)).delete(synchronize_session=False)
+            deleted_counts["redeem_voucher"] = db.session.query(RedeemVoucherEvent).filter(RedeemVoucherEvent.event_id.in_(event_ids)).delete(synchronize_session=False)
+            deleted_counts["sell_exploration"] = db.session.query(SellExplorationDataEvent).filter(SellExplorationDataEvent.event_id.in_(event_ids)).delete(synchronize_session=False)
+            deleted_counts["commit_crime"] = db.session.query(CommitCrimeEvent).filter(CommitCrimeEvent.event_id.in_(event_ids)).delete(synchronize_session=False)
+
+            # Synthetic entries linked by event_id
+            deleted_counts["syntheticcz_by_event"] = db.session.query(SyntheticCZ).filter(SyntheticCZ.event_id.in_(event_ids)).delete(synchronize_session=False)
+            deleted_counts["syntheticgroundcz_by_event"] = db.session.query(SyntheticGroundCZ).filter(SyntheticGroundCZ.event_id.in_(event_ids)).delete(synchronize_session=False)
+
+            # Events selbst löschen
+            deleted_counts["events"] = db.session.query(Event).filter(Event.id.in_(event_ids)).delete(synchronize_session=False)
+
+        # Zusätzlich direkte SyntheticCZ / SyntheticGroundCZ löschen, falls cmdr-Feld gesetzt (unabhängig von event)
+        deleted_counts["syntheticcz_by_cmdr"] = db.session.query(SyntheticCZ).filter(func.lower(SyntheticCZ.cmdr) == name_lower).delete(synchronize_session=False)
+        deleted_counts["syntheticgroundcz_by_cmdr"] = db.session.query(SyntheticGroundCZ).filter(func.lower(SyntheticGroundCZ.cmdr) == name_lower).delete(synchronize_session=False)
+
+        # Activities des Cmdr löschen (cascade löscht zu System/Faction gehörende Datensätze)
+        deleted_counts["activities"] = db.session.query(Activity).filter(func.lower(Activity.cmdr) == name_lower).delete(synchronize_session=False)
+
+        # Cmdr-Eintrag löschen
+        deleted_counts["cmdr"] = db.session.query(Cmdr).filter(func.lower(Cmdr.name) == name_lower).delete(synchronize_session=False)
+
+        db.session.commit()
+        return jsonify({
+            "status": "deleted",
+            "target": target,
+            "deleted_counts": deleted_counts
+        }), 200
+
+    except Exception as e:
+        db.session.rollback()
+        logger.exception(f"Error deleting cmdr {name}: {e}")
+        return jsonify({"error": str(e)}), 500
+
 
 ##################################################################
 # Discord Webhook Funktionen
@@ -1537,7 +1669,9 @@ def login_api():
                 "id": uid,
                 "username": username,
                 "is_admin": bool(is_admin),
-                "tenant_name": tenant.get("name")
+                "tenant_name": tenant.get("name"),
+                "faction_name": tenant.get("faction_name"),
+                "faction_logo": tenant.get("faction_logo"),
             })
 
         return jsonify({"error": "Invalid credentials"}), 401
@@ -2412,19 +2546,41 @@ def delete_protected_faction(faction_id):
 # List Unique System Names Endpoint
 @app.route("/api/lists/systems", methods=["GET"])
 @require_api_key
-def list_unique_system_names():
+def list_systems_fast():
     """
-    Returns a list of unique system names from eddn_system_info.
+    Schnelle System-Namenssuche.
+    Query-Parameter:
+      - q: Prefix (mind. 3 Zeichen), z.B. 'sol'
+      - limit: Anzahl Treffer (Default 100, Max 200)
+    Verhalten:
+      - q < 3 Zeichen -> []
+      - Case-Insensitive (COLLATE NOCASE)
     """
     try:
         eddn_db_uri = os.getenv("EDDN_DATABASE")
         if not eddn_db_uri:
             return jsonify({"error": "EDDN_DATABASE not configured in .env"}), 500
+
+        q = (request.args.get("q") or "").strip()
+        limit = min(int(request.args.get("limit", 100)), 200)
+
+        # Mindestlänge für schnelle Client-UX
+        if len(q) < 3:
+            return jsonify([])
+
         engine = create_engine(eddn_db_uri)
         with engine.connect() as conn:
-            rows = conn.execute(text("SELECT DISTINCT system_name FROM eddn_system_info WHERE system_name IS NOT NULL ORDER BY system_name ASC")).fetchall()
-            system_names = [row[0] for row in rows if row[0]]
-        return jsonify(system_names)
+            rows = conn.execute(
+                text("""
+                    SELECT system_name
+                    FROM eddn_system_info
+                    WHERE system_name LIKE :pfx COLLATE NOCASE
+                    ORDER BY system_name
+                    LIMIT :lim
+                """),
+                {"pfx": f"{q}%", "lim": limit}
+            ).fetchall()
+            return jsonify([r[0] for r in rows if r[0]])
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -2499,9 +2655,10 @@ if __name__ == "__main__":
     print("Starting BGS Data API (Waitress, multi-port)...")
     with app.app_context():
         # Multi-Tenant: Prüfe und initialisiere alle Tenant-DBs und protected_faction-Tabellen
-        from databases import initialize_all_tenant_databases, update_all_tenant_databases
+        from databases import initialize_all_tenant_databases, update_all_tenant_databases, ensure_eddn_indexes
         initialize_all_tenant_databases()
         update_all_tenant_databases()
+        ensure_eddn_indexes()
 
         # Debug: Alle Activity-Daten löschen
         # ACHTUNG: Nur zu Testzwecken, auskommentiert lassen!
@@ -2534,6 +2691,10 @@ if __name__ == "__main__":
     # Inara Cmdr Sync Scheduler starten
     from cmdr_sync_inara import start_cmdr_sync_scheduler
     start_cmdr_sync_scheduler(app, db)
+
+    # Systemkoordinaten-Scheduler starten
+    from mining import start_system_coords_scheduler
+    start_system_coords_scheduler(app)
 
     # Multi-Port Binding (5000 & 5555)
     def _bind(host: str, port: int):

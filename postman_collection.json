@@ -53,6 +53,11 @@
                 "key": "apiversion",
                 "value": "1.6.0",
                 "type": "text"
+              },
+              {
+                "key": "apikey",
+                "value": "{{yourapikeyhere}}",
+                "type": "text"
               }
             ],
             "body": {
@@ -84,6 +89,11 @@
                 "key": "apiversion",
                 "value": "1.6.0",
                 "type": "text"
+              },
+              {
+                "key": "apikey",
+                "value": "{{yourapikeyhere}}",
+                "type": "text"
               }
             ],
             "body": {
@@ -105,6 +115,11 @@
               {
                 "key": "apiversion",
                 "value": "1.6.0",
+                "type": "text"
+              },
+              {
+                "key": "apikey",
+                "value": "{{yourapikeyhere}}",
                 "type": "text"
               }
             ],
@@ -1343,6 +1358,11 @@
                 "key": "apiversion",
                 "value": "1.6.0",
                 "type": "text"
+              },
+              {
+                "key": "apikey",
+                "value": "{{yourapikeyhere}}",
+                "type": "text"
               }
             ],
             "body": {
@@ -1402,6 +1422,18 @@
     {
       "name": "Discovery & Health",
       "item": [
+        {
+          "name": "Root",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/",
+              "host": ["{{baseUrl}}"],
+              "path": [""]
+            }
+          },
+          "description": "Basic server info (app root) - in app.py implemented as GET /"
+        },
         {
           "name": "Server Discovery",
           "request": {
@@ -1556,14 +1588,31 @@
                 "key": "apiversion",
                 "value": "1.6.0",
                 "type": "text"
+              },
+              {
+                "key": "apikey",
+                "value": "{{yourapikeyhere}}",
+                "type": "text"
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/lists/systems",
+              "raw": "{{baseUrl}}/api/lists/systems?q=Sol&limit=20",
               "host": ["{{baseUrl}}"],
-              "path": ["api", "lists", "systems"]
+              "path": ["api", "lists", "systems"],
+              "query": [
+                {
+                  "key": "q",
+                  "value": "Sol",
+                  "description": "Prefix (mind. 3 Zeichen) — nötig für Ergebnisse"
+                },
+                {
+                  "key": "limit",
+                  "value": "20",
+                  "description": "Anzahl Treffer (optional, Default 100, Max 200)"
+                }
+              ]
             },
-            "description": "Returns a list of unique system names from eddn_system_info."
+            "description": "Returns a list of unique system names from eddn_system_info. Hinweis: Query-Parameter 'q' benötigt mindestens 3 Zeichen; Endpoint erfordert Header 'apikey' und 'apiversion'. Beispiel: ?q=Sol&limit=20"
           }
         },
         {
@@ -1622,6 +1671,201 @@
             },
             "description": "Returns a list of unique factions from eddn_faction."
           }
+        }
+      ]
+    },
+    {
+      "name": "Mining",
+      "item": [
+        {
+          "name": "Mining Points",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "apiversion", "value": "1.6.0", "type": "text" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/mining/points?type=Painite,Tritium&min_count=0&min_sightings=1&max_age_days=365&half_life_days=45&w_count=1.0&w_sightings=1.0&w_recency=0.5&limit=100",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "mining", "points"],
+              "query": [
+                { "key": "type", "value": "Painite,Tritium", "description": "Signal-Typen (optional, CSV)" },
+                { "key": "min_count", "value": "0", "description": "Mindestanzahl (optional)" },
+                { "key": "min_sightings", "value": "1", "description": "Mindest-Sichtungen (optional)" },
+                { "key": "max_age_days", "value": "365", "description": "Max. Alter in Tagen (optional)" },
+                { "key": "half_life_days", "value": "45", "description": "Halbwertszeit für Score (optional)" },
+                { "key": "w_count", "value": "1.0", "description": "Gewichtung Count (optional)" },
+                { "key": "w_sightings", "value": "1.0", "description": "Gewichtung Sightings (optional)" },
+                { "key": "w_recency", "value": "0.5", "description": "Gewichtung Recency (optional)" },
+                { "key": "limit", "value": "100", "description": "Limit (optional)" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Mining Points Near",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "apiversion", "value": "1.6.0", "type": "text" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/mining/points/near?ref_system=Sol&radius_ly=50&type=Painite&coords_source=auto",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "mining", "points", "near"],
+              "query": [
+                { "key": "ref_system", "value": "Sol", "description": "Referenzsystem (Pflicht)" },
+                { "key": "radius_ly", "value": "50", "description": "Radius in Lichtjahren" },
+                { "key": "type", "value": "Painite", "description": "Signal-Typen (optional, CSV)" },
+                { "key": "coords_source", "value": "auto", "description": "Koordinatenquelle (auto|local|ardent|edsm)" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Mining Hotspots",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "apiversion", "value": "1.6.0", "type": "text" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/mining/hotspots?type=Painite&min_count=0&min_sightings=1&max_age_days=365&half_life_days=45&w_count=1.0&w_sightings=1.0&w_recency=0.5&limit=100",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "mining", "hotspots"],
+              "query": [
+                { "key": "type", "value": "Painite", "description": "Commodity-Typen (optional, CSV)" },
+                { "key": "min_count", "value": "0", "description": "Mindestanzahl (optional)" },
+                { "key": "min_sightings", "value": "1", "description": "Mindest-Sichtungen (optional)" },
+                { "key": "max_age_days", "value": "365", "description": "Max. Alter in Tagen (optional)" },
+                { "key": "half_life_days", "value": "45", "description": "Halbwertszeit für Score (optional)" },
+                { "key": "w_count", "value": "1.0", "description": "Gewichtung Count (optional)" },
+                { "key": "w_sightings", "value": "1.0", "description": "Gewichtung Sightings (optional)" },
+                { "key": "w_recency", "value": "0.5", "description": "Gewichtung Recency (optional)" },
+                { "key": "limit", "value": "100", "description": "Limit (optional)" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Mining Hotspots Near",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "apiversion", "value": "1.6.0", "type": "text" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/mining/hotspots/near?ref_system=Sol&radius_ly=50&type=Painite&coords_source=auto",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "mining", "hotspots", "near"],
+              "query": [
+                { "key": "ref_system", "value": "Sol", "description": "Referenzsystem (Pflicht)" },
+                { "key": "radius_ly", "value": "50", "description": "Radius in Lichtjahren" },
+                { "key": "type", "value": "Painite", "description": "Commodity-Typen (optional, CSV)" },
+                { "key": "coords_source", "value": "auto", "description": "Koordinatenquelle (auto|local|ardent|edsm)" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Exobiology Points",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "apiversion", "value": "1.6.0", "type": "text" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/mining/exo?genus=Tussocks,Fungoid&type=type1&type=type2&min_count=0&min_sightings=1&max_age_days=365&half_life_days=45&w_count=1.0&w_sightings=1.0&w_recency=0.5&limit=100",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "mining", "exo"],
+              "query": [
+                { "key": "genus", "value": "Tussocks,Fungoid", "description": "Genus (optional, CSV)" },
+                { "key": "type", "value": "type1,type2", "description": "Signal-Typen (optional, CSV)" },
+                { "key": "min_count", "value": "0", "description": "Mindestanzahl (optional)" },
+                { "key": "min_sightings", "value": "1", "description": "Mindest-Sichtungen (optional)" },
+                { "key": "max_age_days", "value": "365", "description": "Max. Alter in Tagen (optional)" },
+                { "key": "half_life_days", "value": "45", "description": "Halbwertszeit für Score (optional)" },
+                { "key": "w_count", "value": "1.0", "description": "Gewichtung Count (optional)" },
+                { "key": "w_sightings", "value": "1.0", "description": "Gewichtung Sightings (optional)" },
+                { "key": "w_recency", "value": "0.5", "description": "Gewichtung Recency (optional)" },
+                { "key": "limit", "value": "100", "description": "Limit (optional)" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Exobiology Points Near",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "apiversion", "value": "1.6.0", "type": "text" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/mining/exo/near?ref_system=Sol&radius_ly=50&genus=Tussocks&type=type1&type=type2&coords_source=auto",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "mining", "exo", "near"],
+              "query": [
+                { "key": "ref_system", "value": "Sol", "description": "Referenzsystem (Pflicht)" },
+                { "key": "radius_ly", "value": "50", "description": "Radius in Lichtjahren" },
+                { "key": "genus", "value": "Tussocks", "description": "Genus (optional, CSV)" },
+                { "key": "type", "value": "type1,type2", "description": "Signal-Typen (optional, CSV)" },
+                { "key": "coords_source", "value": "auto", "description": "Koordinatenquelle (auto|local|ardent|edsm)" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Fetch System Coordinates",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "apiversion", "value": "1.6.0", "type": "text" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/mining/fetch-system-coords?source=auto",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "mining", "fetch-system-coords"],
+              "query": [
+                {
+                  "key": "source",
+                  "value": "auto",
+                  "description": "Koordinatenquelle: auto|ardent|edsm|local (optional)"
+                }
+              ]
+            }
+          },
+          "description": "Fragt für alle Systeme ohne Koordinaten die Koordinaten ab und speichert sie. Loggt alle Aktionen in logs/system_coords.log."
+        },
+        {
+          "name": "System Map (sysmap)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/sysmap/Sol?w=1280&full=1",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "sysmap", "Sol"],
+              "query": [
+                {
+                  "key": "w",
+                  "value": "1280",
+                  "description": "Breite in px (640..1920). Default 1280"
+                },
+                {
+                  "key": "full",
+                  "value": "1",
+                  "description": "Full-Page Screenshot: 1 = full, 0 = viewport-only (Default 1)"
+                }
+              ]
+            }
+          },
+          "description": "Rendert und liefert die Systemkarte als PNG. Kein 'apikey' erforderlich. Beispiel: /api/sysmap/Sol?w=1280&full=1"
         }
       ]
     }

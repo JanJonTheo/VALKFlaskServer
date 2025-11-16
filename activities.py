@@ -10,7 +10,7 @@ activities_bp = Blueprint("activities", __name__)
 @activities_bp.route("/activities", methods=["PUT"])
 def put_activities():
     # Tenant-DB setzen wie bei GET-Endpunkten
-    from app import get_tenant_by_apikey, set_tenant_db_config
+    from app import get_tenant_by_apikey, set_tenant_db_config, commit_with_retry
     apikey = request.headers.get("apikey")
     tenant = get_tenant_by_apikey(apikey)
     if not tenant:
@@ -112,7 +112,7 @@ def put_activities():
                 if 'sandr' in fac:
                     faction.sandr = json.dumps(fac['sandr'])
 
-        db.session.commit()
+        commit_with_retry(db.session)
 
         return jsonify({"status": "activity saved"}), 200
     except Exception as e:
@@ -143,6 +143,8 @@ def get_activities(tick_filter=None, cmdr=None, system_name=None, faction_name=N
 
     activities = query.all()
     result = []
+    # Systemnamen-Filter für Case-Insensitive Vergleich vorbereiten
+    system_name_lower = system_name.lower() if system_name else None
     for activity in activities:
         activity_dict = {
             "tickid": activity.tickid,
@@ -152,7 +154,8 @@ def get_activities(tick_filter=None, cmdr=None, system_name=None, faction_name=N
             "systems": []
         }
         for system in activity.systems:
-            if system_name and system.name != system_name:
+            # Case-insensitive Vergleich für Systemnamen
+            if system_name_lower and system.name.lower() != system_name_lower:
                 continue
             system_dict = {
                 "name": system.name,
@@ -433,10 +436,12 @@ def activities_system_summary_api():
         q = db.session.query(Activity).join(Activity.systems)
         if effective_tickid:
             q = q.filter(Activity.tickid == effective_tickid)
-        if system_name:
-            q = q.filter(System.name == system_name)
+        # system_name-Filter erst später anwenden, damit Case-Insensitive möglich ist
 
         acts = q.all()
+
+        # Für Case-Insensitive Vergleich
+        system_name_lower = system_name.lower() if system_name else None
 
         # ---------------------------
         # Aggregation: CMD-LEVEL
@@ -475,7 +480,8 @@ def activities_system_summary_api():
             per = {}  # key = (cmdr, system, tickid)
             for act in acts:
                 for sys in act.systems:
-                    if system_name and sys.name != system_name:
+                    # Case-insensitive Vergleich für Systemnamen
+                    if system_name_lower and sys.name.lower() != system_name_lower:
                         continue
                     key = (act.cmdr, sys.name, act.tickid)
                     if key not in per:
@@ -607,7 +613,8 @@ def activities_system_summary_api():
 
             for act in acts:
                 for sys in act.systems:
-                    if system_name and sys.name != system_name:
+                    # Case-insensitive Vergleich für Systemnamen
+                    if system_name_lower and sys.name.lower() != system_name_lower:
                         continue
                     for fac in sys.factions:
                         key = (sys.name, fac.name, act.tickid)
@@ -708,7 +715,8 @@ def activities_system_summary_api():
 
         for act in acts:
             for sys in act.systems:
-                if system_name and sys.name != system_name:
+                # Case-insensitive Vergleich für Systemnamen
+                if system_name_lower and sys.name.lower() != system_name_lower:
                     continue
 
                 key = (sys.name, act.tickid)

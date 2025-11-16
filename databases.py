@@ -153,3 +153,20 @@ def delete_all_activity_data():
             logger.error(f"Fehler beim Löschen der Daten für Tenant {db_uri}: {e}")
         finally:
             session.close()
+
+
+# Sicherstellen sinnvoller Indizes in der EDDN-Datenbank
+def ensure_eddn_indexes():
+    """Erzeugt sinnvolle Indizes im EDDN-DB-Kontext, falls nicht vorhanden."""
+    try:
+        eddn_db_uri = os.getenv("EDDN_DATABASE")
+        if not eddn_db_uri:
+            logger.warning("EDDN_DATABASE not configured; skip index creation")
+            return
+        engine = create_engine(eddn_db_uri)
+        with engine.connect() as conn:
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_esi_system_name ON eddn_system_info(system_name);"))
+            # Ggf. weitere Indizes hier ergänzen
+            logger.info("EDDN indexes ensured (idx_esi_system_name).")
+    except Exception as e:
+        logger.error(f"ensure_eddn_indexes failed: {e}")

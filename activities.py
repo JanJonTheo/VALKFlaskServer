@@ -10,7 +10,8 @@ activities_bp = Blueprint("activities", __name__)
 @activities_bp.route("/activities", methods=["PUT"])
 def put_activities():
     # Tenant-DB setzen wie bei GET-Endpunkten
-    from app import get_tenant_by_apikey, set_tenant_db_config, commit_with_retry
+    # und globalen Schreib-Lock + Commit-Helfer holen
+    from app import get_tenant_by_apikey, set_tenant_db_config, db_write_lock, commit_with_retry
     apikey = request.headers.get("apikey")
     tenant = get_tenant_by_apikey(apikey)
     if not tenant:
@@ -24,97 +25,104 @@ def put_activities():
         activity_data = request.get_json()
         validated = activity_data
 
-        # Suche nach vorhandenem Activity-Datensatz
-        activity = db.session.query(Activity).filter_by(
-            tickid=validated['tickid'],
-            cmdr=validated.get('cmdr')
-        ).first()
-        if not activity:
-            activity = Activity(
-                tickid=validated['tickid'],
-                ticktime=validated['ticktime'],
-                timestamp=validated['timestamp'],
-                cmdr=validated.get('cmdr')
-            )
-            db.session.add(activity)
-        else:
-            activity.ticktime = validated['ticktime']
-            activity.timestamp = validated['timestamp']
+        # Alle Schreibzugriffe serialisieren, damit SQLite nicht parallel blockiert
+        with db_write_lock:
+            # Autoflush unterdrücken, damit nicht mitten in Queries/Schleifen ein Flush/Write passiert
+            with db.session.no_autoflush:
 
-        # Systeme aktualisieren/hinzufügen
-        for sys in validated['systems']:
-            system = db.session.query(System).filter_by(
-                activity_id=activity.id,
-                name=sys['name'],
-                address=sys['address']
-            ).first()
-            if not system:
-                system = System(
-                    name=sys['name'],
-                    address=sys['address']
-                )
-                activity.systems.append(system)
-            # Felder aktualisieren
-            if 'twkills' in sys:
-                system.twkills = json.dumps(sys['twkills'])
-            if 'twsandr' in sys:
-                system.twsandr = json.dumps(sys['twsandr'])
-            if 'twreactivate' in sys:
-                system.twreactivate = sys['twreactivate']
-
-            # Fraktionen aktualisieren/hinzufügen
-            for fac in sys['factions']:
-                faction = db.session.query(Faction).filter_by(
-                    system_id=system.id,
-                    name=fac['name']
+                # Suche nach vorhandenem Activity-Datensatz
+                activity = db.session.query(Activity).filter_by(
+                    tickid=validated['tickid'],
+                    cmdr=validated.get('cmdr')
                 ).first()
-                if not faction:
-                    faction = Faction(
-                        name=fac['name'],
-                        state=fac['state'],
-                        bvs=fac.get('bvs', 0),
-                        cbs=fac.get('cbs', 0),
-                        exobiology=fac.get('exobiology', 0),
-                        exploration=fac.get('exploration', 0),
-                        scenarios=fac.get('scenarios', 0),
-                        infprimary=fac.get('infprimary', 0),
-                        infsecondary=fac.get('infsecondary', 0),
-                        missionfails=fac.get('missionfails', 0),
-                        murdersground=fac.get('murdersground', 0),
-                        murdersspace=fac.get('murdersspace', 0),
-                        tradebm=fac.get('tradebm', 0)
+                if not activity:
+                    activity = Activity(
+                        tickid=validated['tickid'],
+                        ticktime=validated['ticktime'],
+                        timestamp=validated['timestamp'],
+                        cmdr=validated.get('cmdr')
                     )
-                    system.factions.append(faction)
+                    db.session.add(activity)
                 else:
-                    faction.state = fac['state']
-                    faction.bvs = fac.get('bvs', 0)
-                    faction.cbs = fac.get('cbs', 0)
-                    faction.exobiology = fac.get('exobiology', 0)
-                    faction.exploration = fac.get('exploration', 0)
-                    faction.scenarios = fac.get('scenarios', 0)
-                    faction.infprimary = fac.get('infprimary', 0)
-                    faction.infsecondary = fac.get('infsecondary', 0)
-                    faction.missionfails = fac.get('missionfails', 0)
-                    faction.murdersground = fac.get('murdersground', 0)
-                    faction.murdersspace = fac.get('murdersspace', 0)
-                    faction.tradebm = fac.get('tradebm', 0)
-                # Neue Felder für Faction
-                if 'stations' in fac:
-                    faction.stations = json.dumps(fac['stations'])
-                if 'czground' in fac:
-                    faction.czground = json.dumps(fac['czground'])
-                if 'czspace' in fac:
-                    faction.czspace = json.dumps(fac['czspace'])
-                if 'tradebuy' in fac:
-                    faction.tradebuy = json.dumps(fac['tradebuy'])
-                if 'tradesell' in fac:
-                    faction.tradesell = json.dumps(fac['tradesell'])
-                if 'sandr' in fac:
-                    faction.sandr = json.dumps(fac['sandr'])
+                    activity.ticktime = validated['ticktime']
+                    activity.timestamp = validated['timestamp']
 
-        commit_with_retry(db.session)
+                # Systeme aktualisieren/hinzufügen
+                for sys in validated['systems']:
+                    system = db.session.query(System).filter_by(
+                        activity_id=activity.id,
+                        name=sys['name'],
+                        address=sys['address']
+                    ).first()
+                    if not system:
+                        system = System(
+                            name=sys['name'],
+                            address=sys['address']
+                        )
+                        activity.systems.append(system)
+                    # Felder aktualisieren
+                    if 'twkills' in sys:
+                        system.twkills = json.dumps(sys['twkills'])
+                    if 'twsandr' in sys:
+                        system.twsandr = json.dumps(sys['twsandr'])
+                    if 'twreactivate' in sys:
+                        system.twreactivate = sys['twreactivate']
+
+                    # Fraktionen aktualisieren/hinzufügen
+                    for fac in sys['factions']:
+                        faction = db.session.query(Faction).filter_by(
+                            system_id=system.id,
+                            name=fac['name']
+                        ).first()
+                        if not faction:
+                            faction = Faction(
+                                name=fac['name'],
+                                state=fac['state'],
+                                bvs=fac.get('bvs', 0),
+                                cbs=fac.get('cbs', 0),
+                                exobiology=fac.get('exobiology', 0),
+                                exploration=fac.get('exploration', 0),
+                                scenarios=fac.get('scenarios', 0),
+                                infprimary=fac.get('infprimary', 0),
+                                infsecondary=fac.get('infsecondary', 0),
+                                missionfails=fac.get('missionfails', 0),
+                                murdersground=fac.get('murdersground', 0),
+                                murdersspace=fac.get('murdersspace', 0),
+                                tradebm=fac.get('tradebm', 0)
+                            )
+                            system.factions.append(faction)
+                        else:
+                            faction.state = fac['state']
+                            faction.bvs = fac.get('bvs', 0)
+                            faction.cbs = fac.get('cbs', 0)
+                            faction.exobiology = fac.get('exobiology', 0)
+                            faction.exploration = fac.get('exploration', 0)
+                            faction.scenarios = fac.get('scenarios', 0)
+                            faction.infprimary = fac.get('infprimary', 0)
+                            faction.infsecondary = fac.get('infsecondary', 0)
+                            faction.missionfails = fac.get('missionfails', 0)
+                            faction.murdersground = fac.get('murdersground', 0)
+                            faction.murdersspace = fac.get('murdersspace', 0)
+                            faction.tradebm = fac.get('tradebm', 0)
+                        # Neue Felder für Faction
+                        if 'stations' in fac:
+                            faction.stations = json.dumps(fac['stations'])
+                        if 'czground' in fac:
+                            faction.czground = json.dumps(fac['czground'])
+                        if 'czspace' in fac:
+                            faction.czspace = json.dumps(fac['czspace'])
+                        if 'tradebuy' in fac:
+                            faction.tradebuy = json.dumps(fac['tradebuy'])
+                        if 'tradesell' in fac:
+                            faction.tradesell = json.dumps(fac['tradesell'])
+                        if 'sandr' in fac:
+                            faction.sandr = json.dumps(fac['sandr'])
+
+            # alles fertig, jetzt ein Commit mit Retry
+            commit_with_retry(db.session)
 
         return jsonify({"status": "activity saved"}), 200
+
     except Exception as e:
         db.session.rollback()
         import logging

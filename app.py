@@ -8,17 +8,20 @@ import logging
 import logging.handlers
 from functools import wraps
 import bcrypt
-from sqlalchemy import text
 import requests as http_requests
 from cmdr_sync_inara import sync_cmdrs_with_inara
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 import os
+import threading
 import json
 import ast
 from activities import activities_bp
 from mining import mining_bp
 from sysmap import sysmap_bp
+
+# Globaler Lock für alle Schreibzugriffe auf die Tenant-DB (Events & Activities)
+db_write_lock = threading.Lock()
 
 # Lade Umgebungsvariablen aus .env
 from dotenv import load_dotenv
@@ -244,155 +247,158 @@ def get_discord_webhook(webhook_type):
 
 # Event-Endpoint
 @app.route("/events", methods=["POST"])
-@require_api_key
 def post_events():
-    try:
-        events_data = request.get_json()
-        for event_dict in events_data:
-            event = Event.from_dict(event_dict)
-            db.session.add(event)
-            db.session.flush()
+    # Nur ein Thread darf gleichzeitig Events in die Tenant-DB schreiben
+    with db_write_lock:
+        try:
+            events_data = request.get_json()
+            for event_dict in events_data:
+                event = Event.from_dict(event_dict)
+                db.session.add(event)
+                db.session.flush()  # erzeugt event.id
 
-            if event.event == "MarketBuy":
-                db.session.add(MarketBuyEvent(
-                    event_id=event.id,
-                    stock=event_dict.get("Stock"),
-                    stock_bracket=event_dict.get("StockBracket"),
-                    value=event_dict.get("TotalCost"),
-                    count=event_dict.get("Count")
-                ))
-            elif event.event == "MarketSell":
-                db.session.add(MarketSellEvent(
-                    event_id=event.id,
-                    demand=event_dict.get("Demand"),
-                    demand_bracket=event_dict.get("DemandBracket"),
-                    profit=event_dict.get("Profit"),
-                    value=event_dict.get("TotalSale"),
-                    count=event_dict.get("Count")
-                ))
-            elif event.event == "MissionCompleted":
-                db.session.add(MissionCompletedEvent(
-                    event_id=event.id,
-                    awarding_faction=event_dict.get("AwardingFaction"),
-                    mission_name=event_dict.get("Name"),
-                    reward=event_dict.get("Reward")
-                ))
-                faction_effects = event_dict.get("FactionEffects", [])
-                for effect in faction_effects:
-                    faction_name = effect.get("Faction")
-                    reputation = effect.get("Reputation")
-                    reputation_trend = effect.get("ReputationTrend")
-                    effect_entries = effect.get("Effects", [])
-                    influence_entries = effect.get("Influence", [])
-                    for infl in influence_entries:
-                        db.session.add(MissionCompletedInfluence(
-                            mission_id=event.id,
-                            system=infl.get("SystemAddress"),
-                            influence=infl.get("Influence"),
-                            trend=infl.get("Trend"),
-                            faction_name=faction_name,
-                            reputation=reputation,
-                            reputation_trend=reputation_trend,
-                            effect=effect_entries[0].get("Effect") if effect_entries else None,
-                            effect_trend=effect_entries[0].get("Trend") if effect_entries else None
-                        ))
-            elif event.event == "FactionKillBond":
-                from models import FactionKillBondEvent
-                db.session.add(FactionKillBondEvent(
-                    event_id=event.id,
-                    killer_ship=event_dict.get("KillerShip"),
-                    awarding_faction=event_dict.get("AwardingFaction"),
-                    victim_faction=event_dict.get("VictimFaction"),
-                    reward = event_dict.get("Reward")
-                ))
-            elif event.event == "MissionFailed":
-                from models import MissionFailedEvent
-                db.session.add(MissionFailedEvent(
-                    event_id=event.id,
-                    mission_name=event_dict.get("Name"),
-                    awarding_faction=event_dict.get("AwardingFaction"),
-                    fine=event_dict.get("Fine")
-                ))
-            elif event.event == "MultiSellExplorationData":
-                from models import MultiSellExplorationDataEvent
-                db.session.add(MultiSellExplorationDataEvent(
-                    event_id=event.id,
-                    total_earnings=event_dict.get("TotalEarnings")
-                ))
-            elif event.event == "RedeemVoucher":
-                from models import RedeemVoucherEvent
-                db.session.add(RedeemVoucherEvent(
-                    event_id=event.id,
-                    amount=event_dict.get("Amount"),
-                    faction=event_dict.get("Faction"),
-                    type=event_dict.get("Type")
-                ))
-            elif event.event == "SellExplorationData":
-                from models import SellExplorationDataEvent
-                db.session.add(SellExplorationDataEvent(
-                    event_id=event.id,
-                    earnings=event_dict.get("TotalEarnings")
-                ))
-            elif event.event == "CommitCrime":
-                from models import CommitCrimeEvent
-                db.session.add(CommitCrimeEvent(
-                    event_id=event.id,
-                    crime_type=event_dict.get("CrimeType"),
-                    faction=event_dict.get("Faction"),
-                    victim=event_dict.get("Victim"),
-                    bounty=event_dict.get("Bounty")
-                ))
-            elif event.event == "SyntheticCZ":
-                def extract_cz_type(data):
-                    for cz in ["low", "medium", "high"]:
-                        if data.get(cz) == 1:
-                            return cz
-                    return None
-                cz_type = extract_cz_type(event_dict)
-                # Faction robust extrahieren
-                faction = event_dict.get("faction") or event_dict.get("Faction")
-                db.session.add(SyntheticCZ(
-                    event_id=event.id,
-                    cz_type=cz_type,
-                    faction=faction,
-                    cmdr=event_dict.get("cmdr"),
-                    station_faction_name=event_dict.get("station_faction_name")
-                ))
-            elif event.event == "SyntheticGroundCZ":
-                def extract_cz_type(data):
-                    for cz in ["low", "medium", "high"]:
-                        if data.get(cz) == 1:
-                            return cz
-                    return None
-                cz_type = extract_cz_type(event_dict)
-                # Faction robust extrahieren
-                faction = event_dict.get("faction") or event_dict.get("Faction")
-                db.session.add(SyntheticGroundCZ(
-                    event_id=event.id,
-                    cz_type=cz_type,
-                    settlement=event_dict.get("settlement"),
-                    faction=faction,
-                    cmdr=event_dict.get("cmdr"),
-                    station_faction_name=event_dict.get("station_faction_name")
-                ))
+                if event.event == "MarketBuy":
+                    db.session.add(MarketBuyEvent(
+                        event_id=event.id,
+                        stock=event_dict.get("Stock"),
+                        stock_bracket=event_dict.get("StockBracket"),
+                        value=event_dict.get("TotalCost"),
+                        count=event_dict.get("Count")
+                    ))
+                elif event.event == "MarketSell":
+                    db.session.add(MarketSellEvent(
+                        event_id=event.id,
+                        stock=event_dict.get("Stock"),
+                        stock_bracket=event_dict.get("StockBracket"),
+                        value=event_dict.get("TotalSale"),
+                        count=event_dict.get("Count")
+                    ))
+                elif event.event == "MissionCompleted":
+                    db.session.add(MissionCompletedEvent(
+                        event_id=event.id,
+                        mission_id=event_dict.get("MissionID"),
+                        name=event_dict.get("Name"),
+                        reward=event_dict.get("Reward"),
+                        faction=event_dict.get("Faction"),
+                        donor=event_dict.get("Donor"),
+                        target_faction=event_dict.get("TargetFaction"),
+                        target_type=event_dict.get("TargetType"),
+                        target=event_dict.get("Target"),
+                        kill_count=event_dict.get("KillCount")
+                    ))
+                    # MissionCompletedInfluence-Einträge
+                    from models import MissionCompletedInfluence
+                    faction_effects = event_dict.get("FactionEffects", [])
+                    for effect in faction_effects:
+                        faction_name = effect.get("Faction")
+                        reputation = effect.get("Reputation")
+                        reputation_trend = effect.get("ReputationTrend")
+                        effect_entries = effect.get("Effects", [])
+                        influence_entries = effect.get("Influence", [])
+                        for infl in influence_entries:
+                            db.session.add(MissionCompletedInfluence(
+                                mission_id=event.id,
+                                system=infl.get("SystemAddress"),
+                                influence=infl.get("Influence"),
+                                trend=infl.get("Trend"),
+                                faction_name=faction_name,
+                                reputation=reputation,
+                                reputation_trend=reputation_trend,
+                                effect=effect_entries[0].get("Effect") if effect_entries else None,
+                                effect_trend=effect_entries[0].get("Trend") if effect_entries else None
+                            ))
+                elif event.event == "FactionKillBond":
+                    from models import FactionKillBondEvent
+                    db.session.add(FactionKillBondEvent(
+                        event_id=event.id,
+                        killer_ship=event_dict.get("KillerShip"),
+                        awarding_faction=event_dict.get("AwardingFaction"),
+                        victim_faction=event_dict.get("VictimFaction"),
+                        reward=event_dict.get("Reward")
+                    ))
+                elif event.event == "MultiSellExplorationData":
+                    from models import MultiSellExplorationDataEvent
+                    db.session.add(MultiSellExplorationDataEvent(
+                        event_id=event.id,
+                        total_earnings=event_dict.get("TotalEarnings")
+                    ))
+                elif event.event == "RedeemVoucher":
+                    from models import RedeemVoucherEvent
+                    db.session.add(RedeemVoucherEvent(
+                        event_id=event.id,
+                        amount=event_dict.get("Amount"),
+                        faction=event_dict.get("Faction"),
+                        type=event_dict.get("Type")
+                    ))
+                elif event.event == "SellExplorationData":
+                    from models import SellExplorationDataEvent
+                    db.session.add(SellExplorationDataEvent(
+                        event_id=event.id,
+                        earnings=event_dict.get("TotalEarnings")
+                    ))
+                elif event.event == "CommitCrime":
+                    from models import CommitCrimeEvent
+                    db.session.add(CommitCrimeEvent(
+                        event_id=event.id,
+                        crime_type=event_dict.get("CrimeType"),
+                        faction=event_dict.get("Faction"),
+                        victim=event_dict.get("Victim"),
+                        bounty=event_dict.get("Bounty")
+                    ))
+                elif event.event == "SyntheticCZ":
+                    def extract_cz_type(data):
+                        for cz in ["low", "medium", "high"]:
+                            if cz in data.get("zone", "").lower():
+                                return cz
+                        return None
 
-        commit_with_retry(db.session)
+                    from models import SyntheticCZ
+                    cz_type = extract_cz_type(event_dict)
+                    faction = event_dict.get("faction") or event_dict.get("Faction")
+                    db.session.add(SyntheticCZ(
+                        event_id=event.id,
+                        cz_type=cz_type,
+                        faction=faction,
+                        cmdr=event_dict.get("cmdr"),
+                        station_faction_name=event_dict.get("station_faction_name")
+                    ))
+                elif event.event == "SyntheticGroundCZ":
+                    from models import SyntheticGroundCZ
+                    def extract_cz_type(data):
+                        for cz in ["low", "medium", "high"]:
+                            if cz in data.get("zone", "").lower():
+                                return cz
+                        return None
 
-        # Detect tickid change
-        incoming_tickids = {event.get("tickid") for event in events_data if event.get("tickid")}
-        current_tickid = next(iter(incoming_tickids), None)
-        last_tickid = last_known_tickid.get("value")
+                    cz_type = extract_cz_type(event_dict)
+                    faction = event_dict.get("faction") or event_dict.get("Faction")
+                    db.session.add(SyntheticGroundCZ(
+                        event_id=event.id,
+                        cz_type=cz_type,
+                        settlement=event_dict.get("settlement"),
+                        faction=faction,
+                        cmdr=event_dict.get("cmdr"),
+                        station_faction_name=event_dict.get("station_faction_name")
+                    ))
 
-        if current_tickid and last_tickid != current_tickid:
-            logger.info(f"Tick changed: {last_tickid} → {current_tickid}")
-            last_known_tickid["value"] = current_tickid
+            # Commit für alle Events in diesem Request (mit Retry)
+            commit_with_retry(db.session)
 
-        return jsonify({"status": "success"}), 200
-    except Exception as e:
-        db.session.rollback()
-        logger.error(f"Event processing error: {str(e)}")
-        logger.error(f"Event Request Json: {str(request.get_json())}")
-        return jsonify({"error": str(e)}), 400
+            # Detect tickid change
+            incoming_tickids = {event.get("tickid") for event in events_data if event.get("tickid")}
+            current_tickid = next(iter(incoming_tickids), None)
+            last_tickid = last_known_tickid.get("value")
+
+            if current_tickid and last_tickid != current_tickid:
+                logger.info(f"Tick changed: {last_tickid} → {current_tickid}")
+                last_known_tickid["value"] = current_tickid
+
+            return jsonify({"status": "success"}), 200
+        except Exception as e:
+            db.session.rollback()
+            logger.error(f"Event processing error: {str(e)}")
+            logger.error(f"Event Request Json: {str(request.get_json())}")
+            return jsonify({"error": str(e)}), 400
 
 
 # Activities-Endpoint

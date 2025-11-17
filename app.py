@@ -268,8 +268,8 @@ def post_events():
                 elif event.event == "MarketSell":
                     db.session.add(MarketSellEvent(
                         event_id=event.id,
-                        stock=event_dict.get("Stock"),
-                        stock_bracket=event_dict.get("StockBracket"),
+                        demand=event_dict.get("Demand"),
+                        demand_bracket=event_dict.get("DemandBracket"),
                         value=event_dict.get("TotalSale"),
                         count=event_dict.get("Count")
                     ))
@@ -348,12 +348,11 @@ def post_events():
                 elif event.event == "SyntheticCZ":
                     def extract_cz_type(data):
                         for cz in ["low", "medium", "high"]:
-                            if cz in data.get("zone", "").lower():
+                            if data.get(cz) == 1:
                                 return cz
                         return None
-
-                    from models import SyntheticCZ
                     cz_type = extract_cz_type(event_dict)
+                    # Faction robust extrahieren
                     faction = event_dict.get("faction") or event_dict.get("Faction")
                     db.session.add(SyntheticCZ(
                         event_id=event.id,
@@ -363,14 +362,13 @@ def post_events():
                         station_faction_name=event_dict.get("station_faction_name")
                     ))
                 elif event.event == "SyntheticGroundCZ":
-                    from models import SyntheticGroundCZ
                     def extract_cz_type(data):
                         for cz in ["low", "medium", "high"]:
-                            if cz in data.get("zone", "").lower():
+                            if data.get(cz) == 1:
                                 return cz
                         return None
-
                     cz_type = extract_cz_type(event_dict)
+                    # Faction robust extrahieren
                     faction = event_dict.get("faction") or event_dict.get("Faction")
                     db.session.add(SyntheticGroundCZ(
                         event_id=event.id,

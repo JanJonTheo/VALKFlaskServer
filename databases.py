@@ -1,5 +1,5 @@
 import os
-from models import db, System, Faction
+from models import db, System, Faction, MissionCompletedEvent
 from sqlalchemy.engine import make_url
 from sqlalchemy import create_engine, inspect, text, Column, Integer, String, Boolean, MetaData, Table
 import sqlalchemy
@@ -99,6 +99,7 @@ def update_all_tenant_databases():
         with engine.begin() as conn:
             db.Model.metadata.create_all(bind=conn)
             if url.drivername == "sqlite":
+                # --- Tabelle system ---
                 sys_existing = get_existing_columns(engine, "system")
                 sys_model = get_model_columns(System)
                 for col_name, col_obj in sys_model.items():
@@ -111,6 +112,7 @@ def update_all_tenant_databases():
                         except Exception as e:
                             logger.warning(f"Fehler beim Ergänzen von Spalte '{col_name}' in 'system': {e}")
 
+                # --- Tabelle faction ---
                 fac_existing = get_existing_columns(engine, "faction")
                 fac_model = get_model_columns(Faction)
                 for col_name, col_obj in fac_model.items():
@@ -122,6 +124,22 @@ def update_all_tenant_databases():
                             logger.info(f"Spalte '{col_name}' zu Tabelle 'faction' ergänzt für Tenant: {db_uri}")
                         except Exception as e:
                             logger.warning(f"Fehler beim Ergänzen von Spalte '{col_name}' in 'faction': {e}")
+
+                # --- Tabelle mission_completed_event ---
+                mce_existing = get_existing_columns(engine, "mission_completed_event")
+                mce_model = get_model_columns(MissionCompletedEvent)
+                for col_name, col_obj in mce_model.items():
+                    if col_name not in mce_existing:
+                        col_type = str(col_obj.type)
+                        alter_sql = f'ALTER TABLE mission_completed_event ADD COLUMN {col_name} {col_type}'
+                        try:
+                            conn.execute(sqlalchemy.text(alter_sql))
+                            logger.info(
+                                f"Spalte '{col_name}' zu Tabelle 'mission_completed_event' ergänzt für Tenant: {db_uri}")
+                        except Exception as e:
+                            logger.warning(
+                                f"Fehler beim Ergänzen von Spalte '{col_name}' in 'mission_completed_event': {e}"
+                            )
 
         logger.info(f"Tenant-DB aktualisiert: {db_uri}")
 

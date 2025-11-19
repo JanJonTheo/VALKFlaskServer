@@ -46,6 +46,18 @@ class MarketSellEvent(db.Model):
 class MissionCompletedEvent(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     event_id = db.Column(db.Integer, db.ForeignKey('event.id'), nullable=False)
+
+    # NEU: Felder entsprechend app.py /events → MissionCompleted
+    mission_id = db.Column(db.Integer)            # MissionID
+    name = db.Column(db.String(128))             # Name
+    faction = db.Column(db.String(128))          # Faction
+    donor = db.Column(db.String(128))            # Donor
+    target_faction = db.Column(db.String(128))   # TargetFaction
+    target_type = db.Column(db.String(128))      # TargetType
+    target = db.Column(db.String(128))           # Target
+    kill_count = db.Column(db.Integer)           # KillCount
+
+    # Alte Felder zur Abwärtskompatibilität beibehalten
     awarding_faction = db.Column(db.String(128))
     mission_name = db.Column(db.String(128))
     reward = db.Column(db.Integer)

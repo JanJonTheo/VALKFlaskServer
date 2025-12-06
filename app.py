@@ -51,8 +51,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Mutable container to hold last known tickid
-last_known_tickid = {"value": None}
+# Letzte bekannte tickid pro Tenant (key = Tenant-Name oder api_key)
+# Beispiel: {"East India Company": "abc-123", "VALK Development": "xyz-789"}
+last_known_tickid = {}
 
 app = Flask(__name__)
 app.register_blueprint(activities_bp)
@@ -209,8 +210,11 @@ def get_latest_tickid():
     """
     Holt für alle Tenants das aktuellste tickid aus deren Datenbank
     und speichert es im last_known_tickid-Dict unter dem Tenant-Namen.
+    Beispiel:
+        last_known_tickid["East India Company"] = "abc-123"
+        last_known_tickid["VALK Development"]  = "xyz-789"
     """
-    logging.info("[TickTriggerEIC] Get latest tickid für alle Tenants...")
+    logging.info("[TickTriggerEIC] Get latest tickid (last_known_tickid-Dict) für alle Tenants...")
     last_known_tickid.clear()
     for tenant in TENANTS:
         db_uri = tenant.get("db_uri")
@@ -224,10 +228,16 @@ def get_latest_tickid():
             connect_args = {"check_same_thread": False} if is_sqlite else {}
             engine = create_engine(db_uri, connect_args=connect_args)
             with engine.connect() as conn:
-                sql = text("SELECT tickid FROM event WHERE tickid IS NOT NULL ORDER BY timestamp DESC LIMIT 1")
+                sql = text(
+                    "SELECT tickid FROM event "
+                    "WHERE tickid IS NOT NULL "
+                    "ORDER BY timestamp DESC LIMIT 1"
+                )
                 latest = conn.execute(sql).fetchone()
                 last_known_tickid[tenant_name] = latest[0] if latest else None
-                logging.info(f"[TickTriggerEIC] {tenant_name}: tickid = {last_known_tickid[tenant_name]}")
+                logging.info(
+                    f"[TickTriggerEIC] {tenant_name}: tickid = {last_known_tickid[tenant_name]}"
+                )
         except Exception as e:
             logging.error(f"[TickTriggerEIC] Fehler bei Tenant {tenant_name}: {e}")
             last_known_tickid[tenant_name] = None
@@ -247,11 +257,28 @@ def get_discord_webhook(webhook_type):
 
 # Event-Endpoint
 @app.route("/events", methods=["POST"])
+@require_api_key
 def post_events():
+    """
+    Empfängt BGS-Tally Events und schreibt sie in die
+    Tenant-spezifische Datenbank.
+
+    - Tenant wird über @require_api_key gesetzt (g.tenant)
+    - db.session ist pro Request an die Tenant-DB gebunden
+    - Schreibzugriffe werden per db_write_lock serialisiert
+    - tickid-Tracking erfolgt pro Tenant in last_known_tickid
+    """
+    # aktueller Tenant-Name (für Logging und tickid-Tracking)
+    tenant = getattr(g, "tenant", None)
+    tenant_name = None
+    if tenant:
+        tenant_name = tenant.get("name") or tenant.get("api_key")
+
     # Nur ein Thread darf gleichzeitig Events in die Tenant-DB schreiben
     with db_write_lock:
         try:
-            events_data = request.get_json()
+            events_data = request.get_json() or []
+
             for event_dict in events_data:
                 event = Event.from_dict(event_dict)
                 db.session.add(event)
@@ -278,6 +305,7 @@ def post_events():
                         event_id=event.id,
                         mission_id=event_dict.get("MissionID"),
                         name=event_dict.get("Name"),
+                        mission_name=event_dict.get("Name"),
                         reward=event_dict.get("Reward"),
                         faction=event_dict.get("Faction"),
                         donor=event_dict.get("Donor"),
@@ -352,7 +380,6 @@ def post_events():
                                 return cz
                         return None
                     cz_type = extract_cz_type(event_dict)
-                    # Faction robust extrahieren
                     faction = event_dict.get("faction") or event_dict.get("Faction")
                     db.session.add(SyntheticCZ(
                         event_id=event.id,
@@ -368,7 +395,6 @@ def post_events():
                                 return cz
                         return None
                     cz_type = extract_cz_type(event_dict)
-                    # Faction robust extrahieren
                     faction = event_dict.get("faction") or event_dict.get("Faction")
                     db.session.add(SyntheticGroundCZ(
                         event_id=event.id,
@@ -382,16 +408,21 @@ def post_events():
             # Commit für alle Events in diesem Request (mit Retry)
             commit_with_retry(db.session)
 
-            # Detect tickid change
-            incoming_tickids = {event.get("tickid") for event in events_data if event.get("tickid")}
+            # Detect tickid change (pro Tenant)
+            incoming_tickids = {ev.get("tickid") for ev in events_data if ev.get("tickid")}
             current_tickid = next(iter(incoming_tickids), None)
-            last_tickid = last_known_tickid.get("value")
 
-            if current_tickid and last_tickid != current_tickid:
-                logger.info(f"Tick changed: {last_tickid} → {current_tickid}")
-                last_known_tickid["value"] = current_tickid
+            if tenant_name:
+                last_tickid = last_known_tickid.get(tenant_name)
+                if current_tickid and last_tickid != current_tickid:
+                    logger.info(
+                        f"[TickTriggerEIC] Tenant {tenant_name}: tick changed "
+                        f"{last_tickid} → {current_tickid}"
+                    )
+                    last_known_tickid[tenant_name] = current_tickid
 
             return jsonify({"status": "success"}), 200
+
         except Exception as e:
             db.session.rollback()
             logger.error(f"Event processing error: {str(e)}")
@@ -2714,4 +2745,7 @@ if __name__ == "__main__":
     ]
 
     # Waitress starten
-    serve(app, sockets=sockets, threads=8)
+    # Quick-Fix: Threads auf 1 setzen, da Database Sessions nicht Multi-Threading-tauglich sind
+    # TODo: Multi-Tenant: Database Sessions Multi-Threading-tauglich machen
+    # 251206 - multi-threading safe sessions implemented, now testing then remove this quick-fix and raise threads again
+    serve(app, sockets=sockets, threads=1)

@@ -30,8 +30,10 @@ from dateutil.relativedelta import relativedelta
 from flask import jsonify, request, g, has_request_context
 from urllib.parse import quote
 from sqlalchemy import text
+from sqlalchemy import create_engine
 import requests
 import logging
+import os
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -60,8 +62,13 @@ def init_logger():
     logs_dir = Path(__file__).parent / "logs"
     logs_dir.mkdir(exist_ok=True)
     log_path = logs_dir / "bgs_v3.log"
-    print(f"Log Path: {log_path.resolve()}")
+
+    # Only initialize handlers once. Subsequent calls should return the same logger
     logger = logging.getLogger("bgs_v3_bucket_eval")
+    if getattr(logger, "_initialized", False):
+        return logger
+
+    # First-time initialization
     logger.setLevel(logging.INFO)
     log_handler = RotatingFileHandler(log_path, maxBytes=128 * 1024 * 1024, backupCount=3)
     stream_handler = logging.StreamHandler()
@@ -71,6 +78,10 @@ def init_logger():
     logger.addHandler(log_handler)
     logger.addHandler(stream_handler)
     logger.propagate = False
+
+    # mark as initialized to prevent double-adding handlers
+    logger._initialized = True
+    logger.info(f"Log Path: {log_path.resolve()}")
     return logger
 
 
@@ -147,6 +158,68 @@ def bounty_points_from_sum(sum_bounty_credits: int, clamp_negative: bool = True)
     if clamp_negative and points < 0:
         return 0.0
     return float(points)
+
+
+# ---------------------------
+# BGS effect (population-adjusted)
+# ---------------------------
+
+def bgs_effect(effort: float, population: float) -> float:
+    """
+    Calculate BGS effect from effort and system population.
+    Uses: Effect = max(0.025, (1 - log10(Population)/10.875)) * Effort
+    """
+    if population <= 0:
+        raise ValueError("population must be > 0")
+
+    pop_factor = max(0.025, 1.0 - (math.log10(population) / 10.875))
+    return pop_factor * effort
+
+
+# ---------------------------
+# EDDN population helper
+# ---------------------------
+
+def get_population_map_from_eddn(system_names: List[str]) -> Dict[str, Optional[int]]:
+    """
+    Given a list of system names, returns a dict mapping system_name -> population (int) or None.
+    If EDDN_DATABASE is not configured or an error occurs, returns None for the affected systems.
+    """
+    logger = init_logger()
+    eddn_db_uri = os.getenv("EDDN_DATABASE")
+    # initialize result with None defaults
+    pop_map: Dict[str, Optional[int]] = {name: None for name in system_names}
+    logger.info(f"get_population_map_from_eddn called for {len(system_names or [])} system(s)")
+    if not eddn_db_uri:
+        logger.info("EDDN_DATABASE not configured; returning None for all populations")
+        return pop_map
+
+    try:
+        eddn_engine = create_engine(eddn_db_uri)
+        with eddn_engine.connect() as conn:
+            for name in system_names:
+                if not name:
+                    pop_map[name] = None
+                    continue
+                try:
+                    row = conn.execute(
+                        text("SELECT population FROM eddn_system_info WHERE system_name = :name COLLATE NOCASE"),
+                        {"name": name}
+                    ).mappings().first()
+                    pop = int(row["population"]) if row and row.get("population") is not None else None
+                    pop_map[name] = pop
+                    logger.info(f"Population lookup: '{name}' -> {pop}")
+                except Exception as e:
+                    logger.warning(f"Population lookup failed for '{name}': {e}")
+                    pop_map[name] = None
+    except Exception as e:
+        logger.warning(f"Failed to open EDDN DB at {eddn_db_uri}: {e}")
+        # On engine/connect failure, return defaults (None)
+        return pop_map
+
+    found = sum(1 for v in pop_map.values() if v is not None)
+    logger.info(f"get_population_map_from_eddn returning map for {len(pop_map)} systems, with {found} populations found")
+    return pop_map
 
 
 # ---------------------------
@@ -248,6 +321,7 @@ def evaluate_bounty_bucket(
         ORDER BY e.timestamp ASC
     """
 
+    logger.info(f"About to execute bounty query with params: {params}")
     rows = db.session.execute(text(sql), params).mappings().all()
     try:
         logger.info(f"Query executed, fetched {len(rows)} rows satisfying where-clause")
@@ -312,6 +386,8 @@ def evaluate_bounty_bucket(
                 count_voucher=count_voucher,
             )
 
+    logger.info(f"Aggregation complete: produced {len(aggs)} groups (faction-per-system)")
+
     # Finalize: apply formula on SUM per group
     result: List[Dict[str, Any]] = []
     for (sysaddr, faction_name), agg in aggs.items():
@@ -344,7 +420,38 @@ def evaluate_bounty_bucket(
 
     # Sort by bounty_points desc, then credits desc
     result.sort(key=lambda x: (x.get("bounty_points", 0.0), x.get("bounty_credits", 0)), reverse=True)
-    logger.info(f"Aggregation complete: produced {len(result)} groups (faction-per-system)")
+    # additional info: how many unique systems involved
+    unique_systems = {r.get("system") for r in result if r.get("system")}
+    logger.info(f"Aggregation covers {len(unique_systems)} unique system(s): {sorted(list(unique_systems))[:10]}")
+
+    # Enrich results with population using the new helper
+    try:
+        # collect unique system names present in the result
+        sysnames = sorted({(item.get("system") or None) for item in result if item.get("system")})
+        pop_map = get_population_map_from_eddn(sysnames)
+
+        for item in result:
+            sysname = item.get("system")
+            item["population"] = pop_map.get(sysname) if sysname else None
+            # compute bgs_effect when population available and valid
+            try:
+                pop = item.get("population")
+                if pop is not None and isinstance(pop, (int, float)) and pop > 0:
+                    effort = float(item.get("bounty_points", 0.0) or 0.0)
+                    be = bgs_effect(effort, float(pop))
+                    item["bgs_effect"] = round(float(be), 6)
+                else:
+                    item["bgs_effect"] = None
+            except Exception:
+                item["bgs_effect"] = None
+    except Exception:
+        # fallback: ensure field exists
+        for item in result:
+            if "population" not in item:
+                item["population"] = None
+            if "bgs_effect" not in item:
+                item["bgs_effect"] = None
+
     return result
 
 
@@ -354,38 +461,77 @@ def evaluate_bounty_bucket(
 
 def render_bounty_curve_png(
     current_bounty_credits: int,
+    population: Optional[int] = None,
     clamp_negative: bool = True,
     x_max_mcr: int = 100,
     title: str = "Bounties Bucket Curve",
 ) -> bytes:
     """
-    Renders a curve chart (PNG) for bounty points vs bounty credits (in MCr),
+    Renders a curve chart (PNG) for:
+      - bounty points vs bounty credits (in MCr)  [left y-axis]
+      - bgs_effect (population-adjusted)         [right y-axis, if population is provided]
     and marks the current achieved value.
     """
+
     # x axis in credits (0..x_max_mcr MCr)
-    x_vals = []
-    y_vals = []
+    x_vals: List[float] = []
+    y_points: List[float] = []
+    y_effect: List[float] = []
+
+    has_pop = isinstance(population, (int, float)) and float(population) > 0
 
     # Use a small positive start to avoid log(0)
     for mcr in range(1, x_max_mcr + 1):
         credits = mcr * 1_000_000
-        x_vals.append(mcr)
-        y_vals.append(bounty_points_from_sum(credits, clamp_negative=clamp_negative))
+        pts = bounty_points_from_sum(credits, clamp_negative=clamp_negative)
+
+        x_vals.append(float(mcr))
+        y_points.append(float(pts))
+
+        if has_pop:
+            try:
+                y_effect.append(float(bgs_effect(float(pts), float(population))))
+            except Exception:
+                y_effect.append(0.0)
 
     # current point
     current_mcr = current_bounty_credits / 1_000_000.0
     current_points = bounty_points_from_sum(current_bounty_credits, clamp_negative=clamp_negative)
 
+    current_effect = None
+    if has_pop:
+        try:
+            current_effect = float(bgs_effect(float(current_points), float(population)))
+        except Exception:
+            current_effect = None
+
     fig = plt.figure(figsize=(12, 6), dpi=160)
-    ax = fig.add_subplot(111)
+    ax1 = fig.add_subplot(111)
 
-    # Curve (similar style: bold black line, grid)
-    ax.plot(x_vals, y_vals, linewidth=2.5, color="black", label="Bounties (M Cr)")
+    # Left axis: Bucket Points curve
+    ax1.plot(x_vals, y_points, linewidth=2.5, color="black", label="Bucket Points")
 
-    # Marker (clearly visible)
-    ax.scatter([current_mcr], [current_points], s=140, color="red", zorder=5)
-    ax.annotate(
-        f"{current_mcr:.2f} MCr\n{current_points:.2f} pts",
+    # Marker on left axis
+    ax1.scatter([current_mcr], [current_points], s=140, color="red", zorder=5)
+
+    # Optional right axis: BGS Effect curve
+    ax2 = None
+    if has_pop:
+        ax2 = ax1.twinx()
+        ax2.plot(x_vals, y_effect, linewidth=2.5, linestyle="--", color="gray", label="BGS Effect")
+
+        # Marker on right axis
+        if current_effect is not None:
+            ax2.scatter([current_mcr], [current_effect], s=140, color="red", zorder=5)
+
+    # Annotation (include effect if available)
+    if current_effect is None:
+        label_txt = f"{current_mcr:.2f} MCr\n{current_points:.2f} pts"
+    else:
+        label_txt = f"{current_mcr:.2f} MCr\n{current_points:.2f} pts\n{current_effect:.2f} eff"
+
+    ax1.annotate(
+        label_txt,
         xy=(current_mcr, current_points),
         xytext=(10, 10),
         textcoords="offset points",
@@ -394,15 +540,31 @@ def render_bounty_curve_png(
         arrowprops=dict(arrowstyle="->", color="black", lw=1.0),
     )
 
-    ax.set_title(title)
-    ax.set_xlabel("Bounties Redeemed (M Cr)")
-    ax.set_ylabel("Bucket Points")
-    ax.grid(True, which="both", linewidth=0.6, alpha=0.6)
-    ax.legend(loc="upper left")
+    # Titles/labels
+    if has_pop:
+        ax1.set_title(f"{title} (Pop: {int(population):,})")
+    else:
+        ax1.set_title(title)
 
-    # give a bit of headroom on y
-    ax.set_xlim(0, x_max_mcr)
-    ax.set_ylim(0, max(y_vals) * 1.05 if y_vals else 1)
+    ax1.set_xlabel("Bounties Redeemed (M Cr)")
+    ax1.set_ylabel("Bucket Points")
+    ax1.grid(True, which="both", linewidth=0.6, alpha=0.6)
+
+    # Legends: merge if we have ax2
+    if ax2 is not None:
+        ax2.set_ylabel("BGS Effect (population-scaled)")
+        lines_1, labels_1 = ax1.get_legend_handles_labels()
+        lines_2, labels_2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines_1 + lines_2, labels_1 + labels_2, loc="upper left")
+    else:
+        ax1.legend(loc="upper left")
+
+    # Limits/headroom
+    ax1.set_xlim(0, x_max_mcr)
+    ax1.set_ylim(0, max(y_points) * 1.05 if y_points else 1)
+
+    if ax2 is not None and y_effect:
+        ax2.set_ylim(0, max(y_effect) * 1.05 if y_effect else 1)
 
     buf = BytesIO()
     fig.tight_layout()
@@ -410,6 +572,7 @@ def render_bounty_curve_png(
     plt.close(fig)
     buf.seek(0)
     return buf.read()
+
 
 
 # ---------------------------
@@ -539,8 +702,12 @@ def register_bucket_v3_routes(app, db, require_api_key):
 
         title = f"Bounties Curve – {row.get('system','?')} / {row.get('faction','?')}"
 
+        pop = row.get("population")
+        pop = int(pop) if isinstance(pop, (int, float)) and int(pop) > 0 else None
+
         png_bytes = render_bounty_curve_png(
             current_bounty_credits=current_credits,
+            population=pop,
             clamp_negative=clamp_negative,
             x_max_mcr=x_max_mcr,
             title=title,
@@ -592,7 +759,7 @@ def _send_bounty_bucket_to_discord(
     results = []
 
     for t in tenants:
-        #webhook_url = get_discord_webhook(t, "bullis")
+        # webhook_url = get_discord_webhook(t, "bullis")
         webhook_url = get_discord_webhook(t, "bgs")
         if not webhook_url:
             logger.warning(f"No 'bullis' webhook for tenant {t.get('name')}")
@@ -604,7 +771,7 @@ def _send_bounty_bucket_to_discord(
 
         header_msg = (
             "## BGS v3 - 'The 4 Bucket' Evaluation\n"
-            "This evaluation applies the **BGS Bucket Model** by aggregating bounty credits per system and faction first and then converting the total into influence points using a logarithmic function, reflecting diminishing returns and soft caps. The approach follows the **four-bucket concept (combat, trade, exploration, missions)** described in *The BGS Guide* (see *“The Bucket Model”, page 36 ff.), where balanced activity across multiple buckets is more effective than focusing on a single one (<https://sinc.science/bgsguide.pdf>).\n\n"
+            "This evaluation applies the **BGS Bucket Model** by aggregating bounty credits per system and faction first and then converting the total into influence points using a logarithmic function, reflecting diminishing returns and soft caps. The approach follows the **four-bucket concept (combat, trade, exploration, missions)** described in *The BGS Guide* (see *“The Bucket Model”*, page 36 ff.), where balanced activity across multiple buckets is more effective than focusing on a single one (<https://sinc.science/bgsguide.pdf>).\n\n"
             "Note: This is **Phase 1** focusing on the **Combat/Bounty Bucket** using RedeemVoucherEvents of type 'bounty'.\n\n"
             f"Tenant: **{t.get('name')}**\n"
             f"Period/Tick: **{tick_label}**\n"
@@ -635,15 +802,42 @@ def _send_bounty_bucket_to_discord(
 
             lines.append(f"💰🏴‍☠️ **{system_name}**")
             lines.append(f"Total bounty credits: **{total_credits:,} Cr**")
+            # Show population for the system (taken from first available row). If missing or 0, show hint.
+            pop_val = None
+            for _r in rows_sorted:
+                p = _r.get("population")
+                if p is not None:
+                    pop_val = p
+                    break
+
+            if pop_val is None or (isinstance(pop_val, (int, float)) and int(pop_val) == 0):
+                lines.append("Population: **unknown / not available**")
+                lines.append("_Note: Population not determined — BGS Effect values cannot be calculated._")
+            else:
+                try:
+                    lines.append(f"Population: **{int(pop_val):,}**")
+                except Exception:
+                    lines.append("Population: **unknown**")
             lines.append("```text")
-            lines.append(f"{'Faction':<32} | {'Credits':>14} | {'Points':>8}")
-            lines.append("-" * 62)
+            # Single header line including BGS Effect column
+            lines.append(f"{'Faction':<32} | {'Credits':>14} | {'Points':>8} | {'BGS Eff':>9}")
+            lines.append("-" * 74)
 
             for r in rows_sorted:
                 fac = (r.get("faction") or "?")[:32]
                 cr = int(r.get("bounty_credits", 0) or 0)
                 pts = float(r.get("bounty_points", 0.0) or 0.0)
-                lines.append(f"{fac:<32} | {cr:>14,} | {pts:>8.2f}")
+                # bgs_effect comes from evaluate_bounty_bucket; may be None
+                bgs_val = r.get("bgs_effect")
+                if bgs_val is None:
+                    bgs_str = "-"
+                else:
+                    try:
+                        bgs_str = f"{float(bgs_val):.2f}"
+                    except Exception:
+                        bgs_str = "-"
+
+                lines.append(f"{fac:<32} | {cr:>14,} | {pts:>8.2f} | {bgs_str:>9}")
 
             lines.append("```")
 
@@ -655,8 +849,11 @@ def _send_bounty_bucket_to_discord(
                 try:
                     current_credits = int(top_row.get("bounty_credits", 0) or 0)
                     title = f"Bounties Curve – {system_name} / {top_row.get('faction', '?')}"
+                    pop = top_row.get("population")
+                    pop = int(pop) if isinstance(pop, (int, float)) and int(pop) > 0 else None
                     png_bytes = render_bounty_curve_png(
                         current_bounty_credits=current_credits,
+                        population=pop,
                         clamp_negative=clamp,
                         x_max_mcr=100,
                         title=title,
@@ -721,5 +918,4 @@ def _send_bounty_bucket_to_discord(
                 })
 
     return results
-
 

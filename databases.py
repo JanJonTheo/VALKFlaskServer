@@ -1,5 +1,5 @@
 import os
-from models import db, System, Faction, MissionCompletedEvent
+from models import db, System, Faction, MissionCompletedEvent, MarketBuyEvent, MarketSellEvent, RedeemVoucherEvent, MultiSellExplorationDataEvent, SellExplorationDataEvent
 from sqlalchemy.engine import make_url
 from sqlalchemy import create_engine, inspect, text, Column, Integer, String, Boolean, MetaData, Table
 import sqlalchemy
@@ -140,6 +140,71 @@ def update_all_tenant_databases():
                             logger.warning(
                                 f"Fehler beim Ergänzen von Spalte '{col_name}' in 'mission_completed_event': {e}"
                             )
+
+                # --- Tabelle market_buy_event ---
+                mb_existing = get_existing_columns(engine, "market_buy_event")
+                mb_model = get_model_columns(MarketBuyEvent)
+                for col_name, col_obj in mb_model.items():
+                    if col_name not in mb_existing:
+                        col_type = str(col_obj.type)
+                        alter_sql = f'ALTER TABLE market_buy_event ADD COLUMN {col_name} {col_type}'
+                        try:
+                            conn.execute(sqlalchemy.text(alter_sql))
+                            logger.info(f"Spalte '{col_name}' zu Tabelle 'market_buy_event' ergänzt für Tenant: {db_uri}")
+                        except Exception as e:
+                            logger.warning(f"Fehler beim Ergänzen von Spalte '{col_name}' in 'market_buy_event': {e}")
+
+                # --- Tabelle market_sell_event ---
+                ms_existing = get_existing_columns(engine, "market_sell_event")
+                ms_model = get_model_columns(MarketSellEvent)
+                for col_name, col_obj in ms_model.items():
+                    if col_name not in ms_existing:
+                        col_type = str(col_obj.type)
+                        alter_sql = f'ALTER TABLE market_sell_event ADD COLUMN {col_name} {col_type}'
+                        try:
+                            conn.execute(sqlalchemy.text(alter_sql))
+                            logger.info(f"Spalte '{col_name}' zu Tabelle 'market_sell_event' ergänzt für Tenant: {db_uri}")
+                        except Exception as e:
+                            logger.warning(f"Fehler beim Ergänzen von Spalte '{col_name}' in 'market_sell_event': {e}")
+
+                # --- Tabelle redeem_voucher_event ---
+                rv_existing = get_existing_columns(engine, "redeem_voucher_event")
+                rv_model = get_model_columns(RedeemVoucherEvent)
+                for col_name, col_obj in rv_model.items():
+                    if col_name not in rv_existing:
+                        col_type = str(col_obj.type)
+                        alter_sql = f'ALTER TABLE redeem_voucher_event ADD COLUMN {col_name} {col_type}'
+                        try:
+                            conn.execute(sqlalchemy.text(alter_sql))
+                            logger.info(f"Spalte '{col_name}' zu Tabelle 'redeem_voucher_event' ergänzt für Tenant: {db_uri}")
+                        except Exception as e:
+                            logger.warning(f"Fehler beim Ergänzen von Spalte '{col_name}' in 'redeem_voucher_event': {e}")
+
+                # --- Tabelle multi_sell_exploration_data_event ---
+                msed_existing = get_existing_columns(engine, "multi_sell_exploration_data_event")
+                msed_model = get_model_columns(MultiSellExplorationDataEvent)
+                for col_name, col_obj in msed_model.items():
+                    if col_name not in msed_existing:
+                        col_type = str(col_obj.type)
+                        alter_sql = f'ALTER TABLE multi_sell_exploration_data_event ADD COLUMN {col_name} {col_type}'
+                        try:
+                            conn.execute(sqlalchemy.text(alter_sql))
+                            logger.info(f"Spalte '{col_name}' zu Tabelle 'multi_sell_exploration_data_event' ergänzt für Tenant: {db_uri}")
+                        except Exception as e:
+                            logger.warning(f"Fehler beim Ergänzen von Spalte '{col_name}' in 'multi_sell_exploration_data_event': {e}")
+
+                # --- Tabelle sell_exploration_data_event ---
+                sed_existing = get_existing_columns(engine, "sell_exploration_data_event")
+                sed_model = get_model_columns(SellExplorationDataEvent)
+                for col_name, col_obj in sed_model.items():
+                    if col_name not in sed_existing:
+                        col_type = str(col_obj.type)
+                        alter_sql = f'ALTER TABLE sell_exploration_data_event ADD COLUMN {col_name} {col_type}'
+                        try:
+                            conn.execute(sqlalchemy.text(alter_sql))
+                            logger.info(f"Spalte '{col_name}' zu Tabelle 'sell_exploration_data_event' ergänzt für Tenant: {db_uri}")
+                        except Exception as e:
+                            logger.warning(f"Fehler beim Ergänzen von Spalte '{col_name}' in 'sell_exploration_data_event': {e}")
 
         logger.info(f"Tenant-DB aktualisiert: {db_uri}")
 

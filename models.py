@@ -33,6 +33,14 @@ class MarketBuyEvent(db.Model):
     stock_bracket = db.Column(db.Integer)
     value = db.Column(db.Integer)
     count = db.Column(db.Integer)
+    # Neue/zusätzliche Felder aus MarketBuy-Event
+    market_id = db.Column(db.BigInteger)            # MarketID
+    commodity = db.Column(db.String(128))           # Type
+    buy_price = db.Column(db.Integer)               # BuyPrice
+    total_cost = db.Column(db.BigInteger)           # TotalCost
+    station_faction = db.Column(db.String(128))     # StationFaction.Name
+    starsystem = db.Column(db.String(128))          # StarSystem
+    systemaddress = db.Column(db.BigInteger)        # SystemAddress
 
 class MarketSellEvent(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -42,6 +50,15 @@ class MarketSellEvent(db.Model):
     profit = db.Column(db.Integer)
     value = db.Column(db.Integer)
     count = db.Column(db.Integer)
+    # Neue/zusätzliche Felder aus MarketSell-Event
+    market_id = db.Column(db.BigInteger)            # MarketID
+    commodity = db.Column(db.String(128))           # Type
+    sell_price = db.Column(db.Integer)              # SellPrice
+    total_sale = db.Column(db.BigInteger)           # TotalSale
+    avg_price_paid = db.Column(db.Integer)          # AvgPricePaid
+    station_faction = db.Column(db.String(128))     # StationFaction.Name
+    starsystem = db.Column(db.String(128))          # StarSystem
+    systemaddress = db.Column(db.BigInteger)        # SystemAddress
 
 class MissionCompletedEvent(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -136,6 +153,13 @@ class MultiSellExplorationDataEvent(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     event_id = db.Column(db.Integer, db.ForeignKey('event.id'), nullable=False)
     total_earnings = db.Column(db.Integer)
+    # Neue/zusätzliche Felder aus MultiSellExplorationData-Event
+    discovered = db.Column(db.Text)       # JSON-String der Liste 'Discovered'
+    base_value = db.Column(db.Integer)    # BaseValue
+    bonus = db.Column(db.Integer)         # Bonus
+    station_faction = db.Column(db.String(128)) # StationFaction.Name
+    starsystem = db.Column(db.String(128))      # StarSystem
+    systemaddress = db.Column(db.BigInteger)   # SystemAddress
 
 class RedeemVoucherEvent(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -143,11 +167,24 @@ class RedeemVoucherEvent(db.Model):
     amount = db.Column(db.Integer)
     faction = db.Column(db.String(128))
     type = db.Column(db.String(128))
+    # Neue/zusätzliche Felder aus RedeemVoucher-Event
+    factions = db.Column(db.Text)                # JSON-String für Liste von {"Faction":"...","Amount":...}
+    station_faction = db.Column(db.String(128)) # StationFaction.Name
+    starsystem = db.Column(db.String(128))      # StarSystem
+    systemaddress = db.Column(db.BigInteger)    # SystemAddress
 
 class SellExplorationDataEvent(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     event_id = db.Column(db.Integer, db.ForeignKey('event.id'), nullable=False)
     earnings = db.Column(db.Integer)
+    # Neue/zusätzliche Felder aus SellExplorationData-Event
+    systems = db.Column(db.Text)          # JSON-String der Liste 'Systems'
+    discovered = db.Column(db.Text)       # JSON-String der Liste 'Discovered'
+    base_value = db.Column(db.Integer)    # BaseValue
+    bonus = db.Column(db.Integer)         # Bonus
+    station_faction = db.Column(db.String(128)) # StationFaction.Name
+    starsystem = db.Column(db.String(128))      # StarSystem
+    systemaddress = db.Column(db.BigInteger)   # SystemAddress
 
 class Cmdr(db.Model):
     id = db.Column(db.Integer, primary_key=True)

@@ -242,11 +242,20 @@ def format_discord_summary(app=None, db=None):
                 continue
 
             full_message = f"📅 Daily Summary for {start.date()} (UTC) - {tenant.get('name')}\n\n" + "\n\n".join(sections)
-            response = requests.post(webhook_url, json={"content": full_message})
-            if response.status_code == 204:
+            # Ensure trailing zero-width-space line so Discord preserves final blank line
+            zwsp_line = "\n\u200B"
+            msg = full_message
+            if not msg.endswith(zwsp_line):
+                msg = msg + zwsp_line
+            try:
+                response = requests.post(webhook_url, json={"content": msg})
+            except Exception as e:
+                logger.error(f"Discord post exception for {tenant.get('name')}: {e}")
+                response = None
+            if getattr(response, 'status_code', None) == 204:
                 logger.info(f"Discord summary sent successfully for {tenant.get('name')}.")
             else:
-                logger.error(f"Discord post failed for {tenant.get('name')}: {response.status_code} {response.text}")
+                logger.error(f"Discord post failed for {tenant.get('name')}: {getattr(response,'status_code',None)} {getattr(response,'text',None)}")
 
 
 def send_syntheticcz_summary_to_discord(app, db, period="all", tenant=None):
@@ -368,11 +377,19 @@ def send_syntheticcz_summary_to_discord(app, db, period="all", tenant=None):
                     lines.append("```")
                     lines.append("\n")
                 msg = "\n".join(lines)
-                response = requests.post(webhook_url, json={"content": msg})
-                if response.status_code == 204:
+                # Ensure trailing zero-width-space line so Discord preserves final blank line
+                zwsp_line = "\n\u200B"
+                if not msg.endswith(zwsp_line):
+                    msg = msg + zwsp_line
+                try:
+                    response = requests.post(webhook_url, json={"content": msg})
+                except Exception as e:
+                    logger.error(f"SyntheticCZ Discord post exception for {system} ({t.get('name')}): {e}")
+                    response = None
+                if getattr(response, 'status_code', None) == 204:
                     logger.info(f"SyntheticCZ Discord summary sent for {system} ({t.get('name')}).")
                 else:
-                    logger.error(f"SyntheticCZ Discord post failed for {system} ({t.get('name')}): {response.status_code} {response.text}")
+                    logger.error(f"SyntheticCZ Discord post failed for {system} ({t.get('name')}): {getattr(response,'status_code',None)} {getattr(response,'text',None)}")
 
 
 def send_syntheticgroundcz_summary_to_discord(app, db, period="all", tenant=None):
@@ -514,11 +531,19 @@ def send_syntheticgroundcz_summary_to_discord(app, db, period="all", tenant=None
                         lines.append(f"{cmdr:<17} | {czs['low']:>5} | {czs['medium']:>7} | {czs['high']:>5} | {total_cmdr:>6}")
                     lines.append("```")
                 msg = "\n".join(lines)
-                response = requests.post(webhook_url, json={"content": msg})
-                if response.status_code == 204:
+                # Ensure trailing zero-width-space line so Discord preserves final blank line
+                zwsp_line = "\n\u200B"
+                if not msg.endswith(zwsp_line):
+                    msg = msg + zwsp_line
+                try:
+                    response = requests.post(webhook_url, json={"content": msg})
+                except Exception as e:
+                    logger.error(f"SyntheticGroundCZ Discord post exception for {system} ({t.get('name')}): {e}")
+                    response = None
+                if getattr(response, 'status_code', None) == 204:
                     logger.info(f"SyntheticGroundCZ Discord summary sent for {system} ({t.get('name')}).")
                 else:
-                    logger.error(f"SyntheticGroundCZ Discord post failed for {system} ({t.get('name')}): {response.status_code} {response.text}")
+                    logger.error(f"SyntheticGroundCZ Discord post failed for {system} ({t.get('name')}): {getattr(response,'status_code',None)} {getattr(response,'text',None)}")
 
 
 def start_scheduler(app, db):

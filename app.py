@@ -287,18 +287,37 @@ def post_events():
                 if event.event == "MarketBuy":
                     db.session.add(MarketBuyEvent(
                         event_id=event.id,
+                        # bestehende/ältere Felder beibehalten
                         stock=event_dict.get("Stock"),
                         stock_bracket=event_dict.get("StockBracket"),
                         value=event_dict.get("TotalCost"),
-                        count=event_dict.get("Count")
+                        count=event_dict.get("Count"),
+                        # zusätzliche Felder
+                        market_id=event_dict.get("MarketID"),
+                        commodity=event_dict.get("Type"),
+                        buy_price=event_dict.get("BuyPrice"),
+                        total_cost=event_dict.get("TotalCost"),
+                        station_faction=(event_dict.get("StationFaction") or {}).get("Name") if isinstance(event_dict.get("StationFaction"), dict) else None,
+                        starsystem=event_dict.get("StarSystem"),
+                        systemaddress=event_dict.get("SystemAddress")
                     ))
                 elif event.event == "MarketSell":
                     db.session.add(MarketSellEvent(
                         event_id=event.id,
+                        # bestehende/ältere Felder beibehalten
                         demand=event_dict.get("Demand"),
                         demand_bracket=event_dict.get("DemandBracket"),
                         value=event_dict.get("TotalSale"),
-                        count=event_dict.get("Count")
+                        count=event_dict.get("Count"),
+                        # zusätzliche Felder
+                        market_id=event_dict.get("MarketID"),
+                        commodity=event_dict.get("Type"),
+                        sell_price=event_dict.get("SellPrice"),
+                        total_sale=event_dict.get("TotalSale"),
+                        avg_price_paid=event_dict.get("AvgPricePaid"),
+                        station_faction=(event_dict.get("StationFaction") or {}).get("Name") if isinstance(event_dict.get("StationFaction"), dict) else None,
+                        starsystem=event_dict.get("StarSystem"),
+                        systemaddress=event_dict.get("SystemAddress")
                     ))
                 elif event.event == "MissionCompleted":
                     db.session.add(MissionCompletedEvent(
@@ -348,7 +367,14 @@ def post_events():
                     from models import MultiSellExplorationDataEvent
                     db.session.add(MultiSellExplorationDataEvent(
                         event_id=event.id,
-                        total_earnings=event_dict.get("TotalEarnings")
+                        total_earnings=event_dict.get("TotalEarnings"),
+                        # zusätzliche Felder
+                        discovered=json.dumps(event_dict.get("Discovered")) if event_dict.get("Discovered") else None,
+                        base_value=event_dict.get("BaseValue"),
+                        bonus=event_dict.get("Bonus"),
+                        station_faction=(event_dict.get("StationFaction") or {}).get("Name") if isinstance(event_dict.get("StationFaction"), dict) else None,
+                        starsystem=event_dict.get("StarSystem"),
+                        systemaddress=event_dict.get("SystemAddress")
                     ))
                 elif event.event == "RedeemVoucher":
                     from models import RedeemVoucherEvent
@@ -356,13 +382,26 @@ def post_events():
                         event_id=event.id,
                         amount=event_dict.get("Amount"),
                         faction=event_dict.get("Faction"),
-                        type=event_dict.get("Type")
+                        type=event_dict.get("Type"),
+                        # zusätzliche Felder
+                        factions=json.dumps(event_dict.get("Factions")) if event_dict.get("Factions") else None,
+                        station_faction=(event_dict.get("StationFaction") or {}).get("Name") if isinstance(event_dict.get("StationFaction"), dict) else None,
+                        starsystem=event_dict.get("StarSystem"),
+                        systemaddress=event_dict.get("SystemAddress")
                     ))
                 elif event.event == "SellExplorationData":
                     from models import SellExplorationDataEvent
                     db.session.add(SellExplorationDataEvent(
                         event_id=event.id,
-                        earnings=event_dict.get("TotalEarnings")
+                        earnings=event_dict.get("TotalEarnings"),
+                        # zusätzliche Felder
+                        systems=json.dumps(event_dict.get("Systems")) if event_dict.get("Systems") else None,
+                        discovered=json.dumps(event_dict.get("Discovered")) if event_dict.get("Discovered") else None,
+                        base_value=event_dict.get("BaseValue"),
+                        bonus=event_dict.get("Bonus"),
+                        station_faction=(event_dict.get("StationFaction") or {}).get("Name") if isinstance(event_dict.get("StationFaction"), dict) else None,
+                        starsystem=event_dict.get("StarSystem"),
+                        systemaddress=event_dict.get("SystemAddress")
                     ))
                 elif event.event == "CommitCrime":
                     from models import CommitCrimeEvent
@@ -1647,6 +1686,13 @@ def send_syntheticgroundcz_summary_to_discord_api():
 ##################################################################
 from fac_in_conflict import register_fac_conflict_routes
 register_fac_conflict_routes(app, db, require_api_key)
+
+
+##################################################################
+# Register BGS v3 Bucket routes
+##################################################################
+from bgs_v3_bucket_eval import register_bucket_v3_routes
+register_bucket_v3_routes(app, db, require_api_key)
 
 
 ##################################################################

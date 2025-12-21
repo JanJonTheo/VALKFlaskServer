@@ -114,7 +114,7 @@ def start_tick_watch_scheduler():
             logging.error("[TickPollZoy] FLASK_SERVER_URL_PROD not configured; cannot call Flask API endpoint.")
             return
 
-        endpoint = "/api/bgs/v3/bucket/bounty/discord"
+        endpoint = "/api/bgs/v3/bucket/discord"
 
         for tenant in TENANTS:
             tenant_name = tenant.get('name') or tenant.get('api_key')

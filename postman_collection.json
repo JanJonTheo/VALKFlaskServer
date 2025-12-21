@@ -866,118 +866,6 @@
       ]
     },
     {
-      "name": "BGS v3",
-      "item": [
-        {
-          "name": "Bucket Bounty (v3)",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "apiversion",
-                "value": "1.6.0",
-                "type": "text"
-              },
-              {
-                "key": "apikey",
-                "value": "{{yourapikeyhere}}",
-                "type": "text"
-              }
-            ],
-            "url": {
-              "raw": "{{baseUrl}}/api/bgs/v3/bucket/bounty?period=all&tickid=&systemaddress=&system=&faction=&include_cmdr=true&clamp=true",
-              "host": ["{{baseUrl}}"],
-              "path": ["api","bgs","v3","bucket","bounty"],
-              "query": [
-                {"key": "period", "value": "all", "description": "cw|lw|cm|lm|2m|y|cd|ld|ct|lt|all"},
-                {"key": "tickid", "value": "", "description": "optional tickid"},
-                {"key": "systemaddress", "value": "", "description": "optional system address"},
-                {"key": "system", "value": "", "description": "optional system name"},
-                {"key": "faction", "value": "", "description": "optional faction filter"},
-                {"key": "include_cmdr", "value": "true", "description": "include per-cmdr breakdown: true/false"},
-                {"key": "clamp", "value": "true", "description": "clamp negative points: true/false"}
-              ]
-            }
-          },
-          "description": "Bucket evaluator v3 - bounty metric (sum_then_formula). Uses RedeemVoucherEvent.factions JSON to aggregate credits per (systemaddress,faction) and then applies the bucket formula."
-        },
-        {
-          "name": "Bucket Bounty Discord (POST)",
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "apiversion",
-                "value": "1.6.0",
-                "type": "text"
-              },
-              {
-                "key": "apikey",
-                "value": "{{yourapikeyhere}}",
-                "type": "text"
-              },
-              {
-                "key": "Content-Type",
-                "value": "application/x-www-form-urlencoded"
-              }
-            ],
-            "body": {
-              "mode": "urlencoded",
-              "urlencoded": [
-                {"key": "period", "value": "all", "type": "text"},
-                {"key": "tickid", "value": "", "type": "text"},
-                {"key": "systemaddress", "value": "", "type": "text"},
-                {"key": "system", "value": "", "type": "text"},
-                {"key": "faction", "value": "", "type": "text"},
-                {"key": "include_cmdr", "value": "true", "type": "text"},
-                {"key": "clamp", "value": "true", "type": "text"}
-              ]
-            },
-            "url": {
-              "raw": "{{baseUrl}}/api/bgs/v3/bucket/bounty/discord",
-              "host": ["{{baseUrl}}"],
-              "path": ["api","bgs","v3","bucket","bounty","discord"]
-            }
-          },
-          "description": "Trigger Discord dispatch for bounty bucket (POST with form-encoded parameters). Requires apikey header."
-        },
-        {
-          "name": "Bucket Bounty Chart",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "apiversion",
-                "value": "1.6.0",
-                "type": "text"
-              },
-              {
-                "key": "apikey",
-                "value": "{{yourapikeyhere}}",
-                "type": "text"
-              }
-            ],
-            "url": {
-              "raw": "{{baseUrl}}/api/bgs/v3/bucket/bounty/chart?period=all&tickid=&systemaddress=&system=&faction=&include_cmdr=true&clamp=true&format=png",
-              "host": ["{{baseUrl}}"],
-              "path": ["api","bgs","v3","bucket","bounty","chart"],
-              "query": [
-                {"key": "period", "value": "all", "description": "cw|lw|cm|lm|2m|y|cd|ld|ct|lt|all"},
-                {"key": "tickid", "value": "", "description": "optional tickid"},
-                {"key": "systemaddress", "value": "", "description": "optional system address"},
-                {"key": "system", "value": "", "description": "optional system name"},
-                {"key": "faction", "value": "", "description": "optional faction filter"},
-                {"key": "include_cmdr", "value": "true", "description": "include per-cmdr breakdown: true/false"},
-                {"key": "clamp", "value": "true", "description": "clamp negative points: true/false"},
-                {"key": "format", "value": "png", "description": "optional chart format: png|svg|json"}
-              ]
-            }
-          },
-          "description": "Returns a chart visualization for the bounty bucket v3 evaluation. Query parameters match /api/bgs/v3/bucket/bounty; optional 'format' may request image (png/svg) or JSON metadata. Requires apikey header."
-        }
-      ]
-    },
-    {
       "name": "Discord Integration",
       "item": [
         {
@@ -1978,6 +1866,90 @@
             }
           },
           "description": "Rendert und liefert die Systemkarte als PNG. Kein 'apikey' erforderlich. Beispiel: /api/sysmap/Sol?w=1280&full=1"
+        }
+      ]
+    },
+    {
+      "name": "BGS v3",
+      "item": [
+        {
+          "name": "Bucket Combined (v3)",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "apiversion", "value": "1.6.0", "type": "text" },
+              { "key": "apikey", "value": "{{yourapikeyhere}}", "type": "text" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/bgs/v3/bucket?period=all&tickid=&ticktime=&systemaddress=&system=&faction=&include_cmdr=true&clamp=true",
+              "host": ["{{baseUrl}}"],
+              "path": ["api","bgs","v3","bucket"],
+              "query": [
+                {"key":"period","value":"all","description":"cw|lw|cm|lm|2m|y|cd|ld|ct|lt|all"},
+                {"key":"tickid","value":"","description":"optional tickid"},
+                {"key":"ticktime","value":"","description":"optional ticktime (ISO8601)"},
+                {"key":"systemaddress","value":"","description":"optional system address"},
+                {"key":"system","value":"","description":"optional system name"},
+                {"key":"faction","value":"","description":"optional faction filter"},
+                {"key":"include_cmdr","value":"true","description":"include per-cmdr breakdown: true/false"},
+                {"key":"clamp","value":"true","description":"clamp negative points: true/false"}
+              ]
+            }
+          },
+          "description": "Combined bucket evaluator v3 - returns combined metrics (bounty + exploration) grouped by (systemaddress,faction)."
+        },
+        {
+          "name": "Bucket Combined Discord (POST)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "apiversion", "value": "1.6.0", "type": "text" },
+              { "key": "apikey", "value": "{{yourapikeyhere}}", "type": "text" },
+              { "key": "Content-Type", "value": "application/x-www-form-urlencoded" }
+            ],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                {"key":"period","value":"all","type":"text"},
+                {"key":"tickid","value":"","type":"text"},
+                {"key":"ticktime","value":"","type":"text"},
+                {"key":"systemaddress","value":"","type":"text"},
+                {"key":"system","value":"","type":"text"},
+                {"key":"faction","value":"","type":"text"},
+                {"key":"include_cmdr","value":"true","type":"text"},
+                {"key":"clamp","value":"true","type":"text"}
+              ]
+            },
+            "url": { "raw": "{{baseUrl}}/api/bgs/v3/bucket/discord", "host":["{{baseUrl}}"], "path":["api","bgs","v3","bucket","discord"] }
+          },
+          "description": "Trigger Discord dispatch for combined bucket (POST with form-encoded parameters). Requires apikey header."
+        },
+        {
+          "name": "Bucket Combined Chart",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "apiversion", "value": "1.6.0", "type": "text" },
+              { "key": "apikey", "value": "{{yourapikeyhere}}", "type": "text" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/bgs/v3/bucket/chart?period=all&tickid=&ticktime=&systemaddress=&system=&faction=&include_cmdr=true&clamp=true&format=png",
+              "host": ["{{baseUrl}}"],
+              "path": ["api","bgs","v3","bucket","chart"],
+              "query": [
+                {"key":"period","value":"all","description":"cw|lw|cm|lm|2m|y|cd|ld|ct|lt|all"},
+                {"key":"tickid","value":"","description":"optional tickid"},
+                {"key":"ticktime","value":"","description":"optional ticktime (ISO8601)"},
+                {"key":"systemaddress","value":"","description":"optional system address"},
+                {"key":"system","value":"","description":"optional system name"},
+                {"key":"faction","value":"","description":"optional faction filter"},
+                {"key":"include_cmdr","value":"true","description":"include per-cmdr breakdown: true/false"},
+                {"key":"clamp","value":"true","description":"clamp negative points: true/false"},
+                {"key":"format","value":"png","description":"optional chart format: png|svg|json"}
+              ]
+            }
+          },
+          "description": "Returns a combined chart visualization (bounty + exploration)."
         }
       ]
     }

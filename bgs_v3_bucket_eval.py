@@ -140,7 +140,7 @@ def _safe_bool(v: Optional[str], default: bool = False) -> bool:
 
 
 # ---------------------------
-# Bucket formula (Bounty)
+# Bucket formulas
 # ---------------------------
 
 def bounty_points_from_sum(sum_bounty_credits: int, clamp_negative: bool = True) -> float:
@@ -154,6 +154,26 @@ def bounty_points_from_sum(sum_bounty_credits: int, clamp_negative: bool = True)
     ratio = sum_bounty_credits / 450_000.0
     # ratio can be < 1 -> log2 negative
     points = 1.33 * (math.log(ratio, 2) if ratio > 0 else float("-inf"))
+
+    if clamp_negative and points < 0:
+        return 0.0
+    return float(points)
+
+
+def exploration_points_from_sum(sum_exploration_credits: int, clamp_negative: bool = True) -> float:
+    """
+    Exploration bucket formula (per your new spec):
+        exploration_points = 0.5 * log2( exploration_value / 1,000,000 )
+
+    Note:
+    - sum_exploration_credits is credits (int)
+    - if ratio < 1 -> log2 negative; clamp_negative clamps to 0 (default)
+    """
+    if sum_exploration_credits <= 0:
+        return 0.0
+
+    ratio = sum_exploration_credits / 1_000_000.0
+    points = 0.5 * (math.log(ratio, 2) if ratio > 0 else float("-inf"))
 
     if clamp_negative and points < 0:
         return 0.0
@@ -236,15 +256,62 @@ class BountyAgg:
     first_ts: Optional[str] = None
     last_ts: Optional[str] = None
     tickids: set = field(default_factory=set)
+    ticktimes: set = field(default_factory=set)
     cmdrs: Dict[str, Dict[str, Any]] = field(default_factory=dict)  # cmdr -> {credits}
 
-    def add(self, amount: int, timestamp: Optional[str], tickid: Optional[str], cmdr: Optional[str], count_voucher: bool):
+    def add(self, amount: int, timestamp: Optional[str], tickid: Optional[str], ticktime: Optional[str], cmdr: Optional[str], count_voucher: bool):
         self.bounty_credits += int(amount or 0)
         if count_voucher:
             self.vouchers += 1
 
         if tickid:
             self.tickids.add(tickid)
+
+        if ticktime:
+            self.ticktimes.add(ticktime)
+
+        if timestamp:
+            if self.first_ts is None or timestamp < self.first_ts:
+                self.first_ts = timestamp
+            if self.last_ts is None or timestamp > self.last_ts:
+                self.last_ts = timestamp
+
+        if cmdr:
+            d = self.cmdrs.setdefault(cmdr, {"credits": 0})
+            d["credits"] += int(amount or 0)
+
+
+@dataclass
+class ExplorationAgg:
+    system: Optional[str]
+    systemaddress: Optional[int]
+    faction: str
+    exploration_credits: int = 0
+    sales: int = 0  # count of exploration sale events contributing (best-effort)
+    first_ts: Optional[str] = None
+    last_ts: Optional[str] = None
+    tickids: set = field(default_factory=set)
+    ticktimes: set = field(default_factory=set)
+    cmdrs: Dict[str, Dict[str, Any]] = field(default_factory=dict)  # cmdr -> {credits}
+
+    def add(
+        self,
+        amount: int,
+        timestamp: Optional[str],
+        tickid: Optional[str],
+        ticktime: Optional[str],
+        cmdr: Optional[str],
+        count_sale: bool,
+    ):
+        self.exploration_credits += int(amount or 0)
+        if count_sale:
+            self.sales += 1
+
+        if tickid:
+            self.tickids.add(tickid)
+
+        if ticktime:
+            self.ticktimes.add(ticktime)
 
         if timestamp:
             if self.first_ts is None or timestamp < self.first_ts:
@@ -265,11 +332,13 @@ def evaluate_bounty_bucket(
     db,
     period: str = "all",
     tickid: Optional[str] = None,
+    ticktime: Optional[str] = None,
     systemaddress: Optional[str] = None,
     system: Optional[str] = None,
     faction_filter: Optional[str] = None,
     include_cmdr: bool = True,
     clamp_negative: bool = True,
+    enrich_population: bool = True,
 ) -> List[Dict[str, Any]]:
     """
     Reads RedeemVoucherEvent rows for Type='bounty', expands rv.factions JSON (Factions[]),
@@ -277,7 +346,7 @@ def evaluate_bounty_bucket(
     """
 
     logger = init_logger()
-    logger.info(f"evaluate_bounty_bucket called: period={period}, tickid={tickid}, systemaddress={systemaddress}, system={system}, faction_filter={faction_filter}, include_cmdr={include_cmdr}, clamp_negative={clamp_negative}")
+    logger.info(f"evaluate_bounty_bucket called: period={period}, tickid={tickid}, ticktime={ticktime}, systemaddress={systemaddress}, system={system}, faction_filter={faction_filter}, include_cmdr={include_cmdr}, clamp_negative={clamp_negative}")
 
     where = ["rv.type = 'bounty'", "rv.factions IS NOT NULL", "rv.factions != ''"]
 
@@ -293,6 +362,11 @@ def evaluate_bounty_bucket(
     if tickid:
         where.append("e.tickid = :tickid")
         params["tickid"] = tickid
+
+    if ticktime:
+        # ticktime is an ISO timestamp string (human-readable tick timestamp); filter exact match
+        where.append("e.ticktime = :ticktime")
+        params["ticktime"] = ticktime
 
     if systemaddress:
         # compare against COALESCE(rv.systemaddress, e.systemaddress)
@@ -339,6 +413,7 @@ def evaluate_bounty_bucket(
         event_id = int(r["event_id"])
         event_ts = r.get("event_ts")
         tickid_val = r.get("tickid")
+        ticktime_val = r.get("ticktime")
         cmdr = r.get("cmdr")
         starsystem = r.get("starsystem")
         sysaddr = r.get("systemaddress")
@@ -382,70 +457,87 @@ def evaluate_bounty_bucket(
                 amount=int(amount or 0),
                 timestamp=event_ts,
                 tickid=tickid_val,
+                ticktime=ticktime_val,
                 cmdr=cmdr if include_cmdr else None,
                 count_voucher=count_voucher,
             )
 
     logger.info(f"Aggregation complete: produced {len(aggs)} groups (faction-per-system)")
 
-    # Finalize: apply formula on SUM per group
+    # Finalize: compute points PER CMDR and SUM (per cmdr -> sum), then expose cmdr breakdown
     result: List[Dict[str, Any]] = []
     for (sysaddr, faction_name), agg in aggs.items():
-        points = bounty_points_from_sum(agg.bounty_credits, clamp_negative=clamp_negative)
+
+        # Per-CMDR points
+        cmdr_out = {}
+        total_points = 0.0
+
+        if include_cmdr:
+            for c, d in agg.cmdrs.items():
+                c_credits = int(d.get("credits", 0) or 0)
+                c_points = bounty_points_from_sum(c_credits, clamp_negative=clamp_negative)
+                total_points += float(c_points)
+                cmdr_out[c] = {
+                    "credits": c_credits,
+                    "points": round(float(c_points), 6),
+                }
+        else:
+            # if cmdr details not requested, fall back to sum_then_formula for a consistent total
+            total_points = float(bounty_points_from_sum(agg.bounty_credits, clamp_negative=clamp_negative))
 
         item: Dict[str, Any] = {
             "system": agg.system,
             "systemaddress": str(agg.systemaddress) if agg.systemaddress is not None else None,
             "faction": agg.faction,
             "bounty_credits": agg.bounty_credits,
-            "bounty_points": round(points, 6),
+            # IMPORTANT: total points is now sum(per cmdr points)
+            "bounty_points": round(float(total_points), 6),
             "vouchers": agg.vouchers,
             "first_ts": agg.first_ts,
             "last_ts": agg.last_ts,
             "tickids": sorted(list(agg.tickids)) if agg.tickids else [],
+            "ticktimes": sorted(list(agg.ticktimes)) if getattr(agg, 'ticktimes', None) else [],
         }
 
         if include_cmdr:
-            # add cmdr points computed from their summed credits within this group (optional view)
-            cmdr_out = {}
-            for c, d in agg.cmdrs.items():
-                c_points = bounty_points_from_sum(d["credits"], clamp_negative=clamp_negative)
-                cmdr_out[c] = {
-                    "credits": d["credits"],
-                    "points": round(c_points, 6),
-                }
             item["cmdrs"] = cmdr_out
 
         result.append(item)
 
     # Sort by bounty_points desc, then credits desc
-    result.sort(key=lambda x: (x.get("bounty_points", 0.0), x.get("bounty_credits", 0)), reverse=True)
+    result.sort(key=lambda x: (float(x.get("bounty_points", 0.0) or 0.0), int(x.get("bounty_credits", 0) or 0)),
+                reverse=True)
+
     # additional info: how many unique systems involved
     unique_systems = {r.get("system") for r in result if r.get("system")}
     logger.info(f"Aggregation covers {len(unique_systems)} unique system(s): {sorted(list(unique_systems))[:10]}")
 
-    # Enrich results with population using the new helper
-    try:
-        # collect unique system names present in the result
-        sysnames = sorted({(item.get("system") or None) for item in result if item.get("system")})
-        pop_map = get_population_map_from_eddn(sysnames)
+    # Enrich results with population (optional)
+    if enrich_population:
+        try:
+            sysnames = sorted({(item.get("system") or None) for item in result if item.get("system")})
+            pop_map = get_population_map_from_eddn(sysnames)
 
-        for item in result:
-            sysname = item.get("system")
-            item["population"] = pop_map.get(sysname) if sysname else None
-            # compute bgs_effect when population available and valid
-            try:
-                pop = item.get("population")
-                if pop is not None and isinstance(pop, (int, float)) and pop > 0:
-                    effort = float(item.get("bounty_points", 0.0) or 0.0)
-                    be = bgs_effect(effort, float(pop))
-                    item["bgs_effect"] = round(float(be), 6)
-                else:
+            for item in result:
+                sysname = item.get("system")
+                item["population"] = pop_map.get(sysname) if sysname else None
+                try:
+                    pop = item.get("population")
+                    if pop is not None and isinstance(pop, (int, float)) and pop > 0:
+                        effort = float(item.get("bounty_points", 0.0) or 0.0)
+                        be = bgs_effect(effort, float(pop))
+                        item["bgs_effect"] = round(float(be), 6)
+                    else:
+                        item["bgs_effect"] = None
+                except Exception:
                     item["bgs_effect"] = None
-            except Exception:
-                item["bgs_effect"] = None
-    except Exception:
-        # fallback: ensure field exists
+        except Exception:
+            for item in result:
+                if "population" not in item:
+                    item["population"] = None
+                if "bgs_effect" not in item:
+                    item["bgs_effect"] = None
+    else:
         for item in result:
             if "population" not in item:
                 item["population"] = None
@@ -455,116 +547,535 @@ def evaluate_bounty_bucket(
     return result
 
 
-# ---------------------------
-# Bounty curve rendering
-# ---------------------------
-
-def render_bounty_curve_png(
-    current_bounty_credits: int,
-    population: Optional[int] = None,
+def evaluate_exploration_bucket(
+    db,
+    period: str = "all",
+    tickid: Optional[str] = None,
+    ticktime: Optional[str] = None,
+    systemaddress: Optional[str] = None,
+    system: Optional[str] = None,
+    faction_filter: Optional[str] = None,
+    include_cmdr: bool = True,
     clamp_negative: bool = True,
-    x_max_mcr: int = 100,
-    title: str = "Bounties Bucket Curve",
-) -> bytes:
+    enrich_population: bool = True,
+) -> List[Dict[str, Any]]:
     """
-    Renders a curve chart (PNG) for:
-      - bounty points vs bounty credits (in MCr)  [left y-axis]
-      - bgs_effect (population-adjusted)         [right y-axis, if population is provided]
-    and marks the current achieved value.
+    Reads SellExplorationDataEvent + MultiSellExplorationDataEvent rows,
+    sums credits per (systemaddress, station_faction), THEN applies the same bucket formula.
+
+    Credits:
+      - SellExplorationDataEvent.earnings
+      - MultiSellExplorationDataEvent.total_earnings
+
+    System:
+      - *.starsystem / *.systemaddress (fallback: event.starsystem / event.systemaddress)
+
+    Faction:
+      - *.station_faction (single faction)
     """
 
-    # x axis in credits (0..x_max_mcr MCr)
-    x_vals: List[float] = []
-    y_points: List[float] = []
-    y_effect: List[float] = []
-
-    has_pop = isinstance(population, (int, float)) and float(population) > 0
-
-    # Use a small positive start to avoid log(0)
-    for mcr in range(1, x_max_mcr + 1):
-        credits = mcr * 1_000_000
-        pts = bounty_points_from_sum(credits, clamp_negative=clamp_negative)
-
-        x_vals.append(float(mcr))
-        y_points.append(float(pts))
-
-        if has_pop:
-            try:
-                y_effect.append(float(bgs_effect(float(pts), float(population))))
-            except Exception:
-                y_effect.append(0.0)
-
-    # current point
-    current_mcr = current_bounty_credits / 1_000_000.0
-    current_points = bounty_points_from_sum(current_bounty_credits, clamp_negative=clamp_negative)
-
-    current_effect = None
-    if has_pop:
-        try:
-            current_effect = float(bgs_effect(float(current_points), float(population)))
-        except Exception:
-            current_effect = None
-
-    fig = plt.figure(figsize=(12, 6), dpi=160)
-    ax1 = fig.add_subplot(111)
-
-    # Left axis: Bucket Points curve
-    ax1.plot(x_vals, y_points, linewidth=2.5, color="black", label="Bucket Points")
-
-    # Marker on left axis
-    ax1.scatter([current_mcr], [current_points], s=140, color="red", zorder=5)
-
-    # Optional right axis: BGS Effect curve
-    ax2 = None
-    if has_pop:
-        ax2 = ax1.twinx()
-        ax2.plot(x_vals, y_effect, linewidth=2.5, linestyle="--", color="gray", label="BGS Effect")
-
-        # Marker on right axis
-        if current_effect is not None:
-            ax2.scatter([current_mcr], [current_effect], s=140, color="red", zorder=5)
-
-    # Annotation (include effect if available)
-    if current_effect is None:
-        label_txt = f"{current_mcr:.2f} MCr\n{current_points:.2f} pts"
-    else:
-        label_txt = f"{current_mcr:.2f} MCr\n{current_points:.2f} pts\n{current_effect:.2f} eff"
-
-    ax1.annotate(
-        label_txt,
-        xy=(current_mcr, current_points),
-        xytext=(10, 10),
-        textcoords="offset points",
-        fontsize=10,
-        bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="black", alpha=0.9),
-        arrowprops=dict(arrowstyle="->", color="black", lw=1.0),
+    logger = init_logger()
+    logger.info(
+        f"evaluate_exploration_bucket called: period={period}, tickid={tickid}, ticktime={ticktime}, "
+        f"systemaddress={systemaddress}, system={system}, faction_filter={faction_filter}, "
+        f"include_cmdr={include_cmdr}, clamp_negative={clamp_negative}"
     )
 
-    # Titles/labels
-    if has_pop:
-        ax1.set_title(f"{title} (Pop: {int(population):,})")
+    params: Dict[str, Any] = {}
+
+    start_iso, end_iso = _period_range_utc(period)
+
+    # We apply the same filter set to BOTH tables via two WHERE blocks, then UNION ALL.
+    where_common = ["e.cmdr IS NOT NULL"]
+
+    if start_iso and end_iso:
+        where_common.append("e.timestamp BETWEEN :start_ts AND :end_ts")
+        params["start_ts"] = start_iso
+        params["end_ts"] = end_iso
+
+    if tickid:
+        where_common.append("e.tickid = :tickid")
+        params["tickid"] = tickid
+
+    if ticktime:
+        where_common.append("e.ticktime = :ticktime")
+        params["ticktime"] = ticktime
+
+    if systemaddress:
+        # compare against COALESCE(tbl.systemaddress, e.systemaddress)
+        where_common.append("CAST(COALESCE(x_systemaddress, e.systemaddress) AS TEXT) = :systemaddress")
+        params["systemaddress"] = str(systemaddress)
+
+    if system:
+        where_common.append("COALESCE(x_starsystem, e.starsystem) = :system")
+        params["system"] = system
+
+    # NOTE: faction_filter is applied after fetch (like bounty JSON expansion), for symmetry and safety.
+
+    # Build SQL with placeholders "x_starsystem/x_systemaddress" replaced per SELECT.
+    where_sql_template = " AND ".join(where_common)
+
+    sql = f"""
+        SELECT
+            e.id AS event_id,
+            e.timestamp AS event_ts,
+            e.tickid AS tickid,
+            e.ticktime AS ticktime,
+            e.cmdr AS cmdr,
+            COALESCE(se.starsystem, e.starsystem) AS starsystem,
+            COALESCE(se.systemaddress, e.systemaddress) AS systemaddress,
+            se.station_faction AS station_faction,
+            se.earnings AS credits
+        FROM sell_exploration_data_event se
+        JOIN event e ON e.id = se.event_id
+        WHERE {where_sql_template.replace("x_starsystem", "se.starsystem").replace("x_systemaddress", "se.systemaddress")}
+
+        UNION ALL
+
+        SELECT
+            e.id AS event_id,
+            e.timestamp AS event_ts,
+            e.tickid AS tickid,
+            e.ticktime AS ticktime,
+            e.cmdr AS cmdr,
+            COALESCE(me.starsystem, e.starsystem) AS starsystem,
+            COALESCE(me.systemaddress, e.systemaddress) AS systemaddress,
+            me.station_faction AS station_faction,
+            me.total_earnings AS credits
+        FROM multi_sell_exploration_data_event me
+        JOIN event e ON e.id = me.event_id
+        WHERE {where_sql_template.replace("x_starsystem", "me.starsystem").replace("x_systemaddress", "me.systemaddress")}
+
+        ORDER BY event_ts ASC
+    """
+
+    logger.info(f"About to execute exploration query with params: {params}")
+    rows = db.session.execute(text(sql), params).mappings().all()
+    try:
+        logger.info(f"Exploration query executed, fetched {len(rows)} rows satisfying where-clause")
+    except Exception:
+        pass
+
+    # Aggregate key: (systemaddress, faction)
+    aggs: Dict[Tuple[Optional[int], str], ExplorationAgg] = {}
+
+    # Count sales events per (system,faction) once per event_id (like bounty vouchers logic).
+    seen_event: set[int] = set()
+
+    for r in rows:
+        event_id = int(r["event_id"])
+        event_ts = r.get("event_ts")
+        tickid_val = r.get("tickid")
+        ticktime_val = r.get("ticktime")
+        cmdr = r.get("cmdr")
+        starsystem = r.get("starsystem")
+        sysaddr = r.get("systemaddress")
+        faction_name = (r.get("station_faction") or "").strip()
+        credits = int(r.get("credits") or 0)
+
+        if not faction_name:
+            continue
+
+        if faction_filter and faction_name != faction_filter:
+            continue
+
+        key = (sysaddr, faction_name)
+        if key not in aggs:
+            aggs[key] = ExplorationAgg(
+                system=starsystem,
+                systemaddress=sysaddr,
+                faction=faction_name,
+            )
+
+        count_sale = False
+        if event_id not in seen_event:
+            seen_event.add(event_id)
+            count_sale = True
+
+        aggs[key].add(
+            amount=credits,
+            timestamp=event_ts,
+            tickid=tickid_val,
+            ticktime=ticktime_val,
+            cmdr=cmdr if include_cmdr else None,
+            count_sale=count_sale,
+        )
+
+    logger.info(f"Exploration aggregation complete: produced {len(aggs)} groups (faction-per-system)")
+
+    # Finalize: compute points PER CMDR and SUM (per cmdr -> sum), then expose cmdr breakdown
+    result: List[Dict[str, Any]] = []
+    for (sysaddr, faction_name), agg in aggs.items():
+
+        cmdr_out = {}
+        total_points = 0.0
+
+        if include_cmdr:
+            for c, d in agg.cmdrs.items():
+                c_credits = int(d.get("credits", 0) or 0)
+                c_points = exploration_points_from_sum(c_credits, clamp_negative=clamp_negative)
+                total_points += float(c_points)
+                cmdr_out[c] = {
+                    "credits": c_credits,
+                    "points": round(float(c_points), 6),
+                }
+        else:
+            total_points = float(exploration_points_from_sum(agg.exploration_credits, clamp_negative=clamp_negative))
+
+        item: Dict[str, Any] = {
+            "system": agg.system,
+            "systemaddress": str(agg.systemaddress) if agg.systemaddress is not None else None,
+            "faction": agg.faction,
+            "exploration_credits": agg.exploration_credits,
+            "exploration_points": round(float(total_points), 6),
+            "sales": agg.sales,
+            "first_ts": agg.first_ts,
+            "last_ts": agg.last_ts,
+            "tickids": sorted(list(agg.tickids)) if agg.tickids else [],
+            "ticktimes": sorted(list(agg.ticktimes)) if getattr(agg, "ticktimes", None) else [],
+        }
+
+        if include_cmdr:
+            item["cmdrs"] = cmdr_out
+
+        result.append(item)
+
+    # Sort by exploration_points desc, then credits desc
+    result.sort(
+        key=lambda x: (float(x.get("exploration_points", 0.0) or 0.0), int(x.get("exploration_credits", 0) or 0)),
+        reverse=True,
+    )
+
+    unique_systems = {r.get("system") for r in result if r.get("system")}
+    logger.info(f"Exploration covers {len(unique_systems)} unique system(s): {sorted(list(unique_systems))[:10]}")
+
+    # Enrich with population + bgs_effect (optional)
+    if enrich_population:
+        try:
+            sysnames = sorted({(item.get("system") or None) for item in result if item.get("system")})
+            pop_map = get_population_map_from_eddn(sysnames)
+
+            for item in result:
+                sysname = item.get("system")
+                item["population"] = pop_map.get(sysname) if sysname else None
+                try:
+                    pop = item.get("population")
+                    if pop is not None and isinstance(pop, (int, float)) and pop > 0:
+                        effort = float(item.get("exploration_points", 0.0) or 0.0)
+                        be = bgs_effect(effort, float(pop))
+                        item["bgs_effect"] = round(float(be), 6)
+                    else:
+                        item["bgs_effect"] = None
+                except Exception:
+                    item["bgs_effect"] = None
+        except Exception:
+            for item in result:
+                if "population" not in item:
+                    item["population"] = None
+                if "bgs_effect" not in item:
+                    item["bgs_effect"] = None
     else:
-        ax1.set_title(title)
+        for item in result:
+            if "population" not in item:
+                item["population"] = None
+            if "bgs_effect" not in item:
+                item["bgs_effect"] = None
 
-    ax1.set_xlabel("Bounties Redeemed (M Cr)")
-    ax1.set_ylabel("Bucket Points")
-    ax1.grid(True, which="both", linewidth=0.6, alpha=0.6)
+    return result
 
-    # Legends: merge if we have ax2
-    if ax2 is not None:
-        ax2.set_ylabel("BGS Effect (population-scaled)")
-        lines_1, labels_1 = ax1.get_legend_handles_labels()
-        lines_2, labels_2 = ax2.get_legend_handles_labels()
-        ax1.legend(lines_1 + lines_2, labels_1 + labels_2, loc="upper left")
-    else:
-        ax1.legend(loc="upper left")
 
-    # Limits/headroom
-    ax1.set_xlim(0, x_max_mcr)
-    ax1.set_ylim(0, max(y_points) * 1.05 if y_points else 1)
+def evaluate_bucket_all_metrics(
+    db,
+    period: str = "all",
+    tickid: Optional[str] = None,
+    ticktime: Optional[str] = None,
+    systemaddress: Optional[str] = None,
+    system: Optional[str] = None,
+    faction_filter: Optional[str] = None,
+    include_cmdr: bool = True,
+    clamp_negative: bool = True,
+) -> List[Dict[str, Any]]:
+    """
+    Combined evaluator over ALL metrics (currently: bounty + exploration).
+    Output grouped by (systemaddress, faction).
+    Includes totals + per-cmdr totals for combined plot and discord.
+    """
 
-    if ax2 is not None and y_effect:
-        ax2.set_ylim(0, max(y_effect) * 1.05 if y_effect else 1)
+    logger = init_logger()
+    logger.info(
+        f"evaluate_bucket_all_metrics called: period={period}, tickid={tickid}, ticktime={ticktime}, "
+        f"systemaddress={systemaddress}, system={system}, faction_filter={faction_filter}, "
+        f"include_cmdr={include_cmdr}, clamp_negative={clamp_negative}"
+    )
+
+    bounty_rows = evaluate_bounty_bucket(
+        db=db,
+        period=period,
+        tickid=tickid,
+        ticktime=ticktime,
+        systemaddress=systemaddress,
+        system=system,
+        faction_filter=faction_filter,
+        include_cmdr=include_cmdr,
+        clamp_negative=clamp_negative,
+        enrich_population=False,
+    )
+
+    expl_rows = evaluate_exploration_bucket(
+        db=db,
+        period=period,
+        tickid=tickid,
+        ticktime=ticktime,
+        systemaddress=systemaddress,
+        system=system,
+        faction_filter=faction_filter,
+        include_cmdr=include_cmdr,
+        clamp_negative=clamp_negative,
+        enrich_population=False,
+    )
+
+    merged: Dict[Tuple[Optional[str], str], Dict[str, Any]] = {}
+
+    def _k(row: Dict[str, Any]) -> Tuple[Optional[str], str]:
+        return (row.get("systemaddress"), (row.get("faction") or "").strip())
+
+    # seed from bounty
+    for r in bounty_rows:
+        key = _k(r)
+        merged[key] = {
+            "system": r.get("system"),
+            "systemaddress": r.get("systemaddress"),
+            "faction": r.get("faction"),
+            "bounty_credits": int(r.get("bounty_credits", 0) or 0),
+            "bounty_points": float(r.get("bounty_points", 0.0) or 0.0),
+            "vouchers": int(r.get("vouchers", 0) or 0),
+            "exploration_credits": 0,
+            "exploration_points": 0.0,
+            "sales": 0,
+            "first_ts": r.get("first_ts"),
+            "last_ts": r.get("last_ts"),
+            "tickids": sorted(set(r.get("tickids") or [])),
+            "ticktimes": sorted(set(r.get("ticktimes") or [])),
+            "cmdrs": {},
+        }
+
+        if include_cmdr and isinstance(r.get("cmdrs"), dict):
+            for cmdr, d in r["cmdrs"].items():
+                merged[key]["cmdrs"].setdefault(cmdr, {
+                    "bounty_credits": 0, "bounty_points": 0.0,
+                    "exploration_credits": 0, "exploration_points": 0.0,
+                })
+                merged[key]["cmdrs"][cmdr]["bounty_credits"] += int(d.get("credits", 0) or 0)
+                merged[key]["cmdrs"][cmdr]["bounty_points"] += float(d.get("points", 0.0) or 0.0)
+
+    # merge exploration
+    for r in expl_rows:
+        key = _k(r)
+        if key not in merged:
+            merged[key] = {
+                "system": r.get("system"),
+                "systemaddress": r.get("systemaddress"),
+                "faction": r.get("faction"),
+                "bounty_credits": 0,
+                "bounty_points": 0.0,
+                "vouchers": 0,
+                "exploration_credits": int(r.get("exploration_credits", 0) or 0),
+                "exploration_points": float(r.get("exploration_points", 0.0) or 0.0),
+                "sales": int(r.get("sales", 0) or 0),
+                "first_ts": r.get("first_ts"),
+                "last_ts": r.get("last_ts"),
+                "tickids": sorted(set(r.get("tickids") or [])),
+                "ticktimes": sorted(set(r.get("ticktimes") or [])),
+                "cmdrs": {},
+            }
+        else:
+            merged[key]["exploration_credits"] = int(r.get("exploration_credits", 0) or 0)
+            merged[key]["exploration_points"] = float(r.get("exploration_points", 0.0) or 0.0)
+            merged[key]["sales"] = int(r.get("sales", 0) or 0)
+
+            merged[key]["tickids"] = sorted(set((merged[key].get("tickids") or []) + (r.get("tickids") or [])))
+            merged[key]["ticktimes"] = sorted(set((merged[key].get("ticktimes") or []) + (r.get("ticktimes") or [])))
+
+            ft = merged[key].get("first_ts")
+            lt = merged[key].get("last_ts")
+            rft = r.get("first_ts")
+            rlt = r.get("last_ts")
+            merged[key]["first_ts"] = min([x for x in [ft, rft] if x]) if (ft or rft) else None
+            merged[key]["last_ts"] = max([x for x in [lt, rlt] if x]) if (lt or rlt) else None
+
+        if include_cmdr and isinstance(r.get("cmdrs"), dict):
+            for cmdr, d in r["cmdrs"].items():
+                merged[key]["cmdrs"].setdefault(cmdr, {
+                    "bounty_credits": 0, "bounty_points": 0.0,
+                    "exploration_credits": 0, "exploration_points": 0.0,
+                })
+                merged[key]["cmdrs"][cmdr]["exploration_credits"] += int(d.get("credits", 0) or 0)
+                merged[key]["cmdrs"][cmdr]["exploration_points"] += float(d.get("points", 0.0) or 0.0)
+
+    out: List[Dict[str, Any]] = []
+    for row in merged.values():
+        row["total_credits"] = int(row.get("bounty_credits", 0) or 0) + int(row.get("exploration_credits", 0) or 0)
+        row["total_points"] = float(row.get("bounty_points", 0.0) or 0.0) + float(row.get("exploration_points", 0.0) or 0.0)
+
+        if include_cmdr and isinstance(row.get("cmdrs"), dict):
+            for _, d in row["cmdrs"].items():
+                d["total_credits"] = int(d.get("bounty_credits", 0) or 0) + int(d.get("exploration_credits", 0) or 0)
+                d["total_points"] = float(d.get("bounty_points", 0.0) or 0.0) + float(d.get("exploration_points", 0.0) or 0.0)
+
+        out.append(row)
+
+    # Population enrichment ONCE per system
+    try:
+        sysnames = sorted({(item.get("system") or None) for item in out if item.get("system")})
+        pop_map = get_population_map_from_eddn(sysnames)
+
+        for item in out:
+            sysname = item.get("system")
+            item["population"] = pop_map.get(sysname) if sysname else None
+            try:
+                pop = item.get("population")
+                if pop is not None and isinstance(pop, (int, float)) and pop > 0:
+                    effort = float(item.get("total_points", 0.0) or 0.0)
+                    item["bgs_effect"] = round(float(bgs_effect(effort, float(pop))), 6)
+                else:
+                    item["bgs_effect"] = None
+            except Exception:
+                item["bgs_effect"] = None
+    except Exception:
+        for item in out:
+            if "population" not in item:
+                item["population"] = None
+            if "bgs_effect" not in item:
+                item["bgs_effect"] = None
+
+    # sort by total_points desc, then total_credits desc
+    out.sort(
+        key=lambda x: (float(x.get("total_points", 0.0) or 0.0), int(x.get("total_credits", 0) or 0)),
+        reverse=True,
+    )
+
+    return out
+
+
+# ---------------------------
+# Curve rendering
+# ---------------------------
+
+def render_bucket_curves_png(
+    current_bounty_credits: int,
+    current_exploration_credits: int,
+    clamp_negative: bool = True,
+    x_max_mcr: int = 100,
+    title: str = "Bucket Curves",
+    bounty_cmdr_points: Optional[Dict[str, Dict[str, Any]]] = None,       # cmdr -> {credits, points}
+    exploration_cmdr_points: Optional[Dict[str, Dict[str, Any]]] = None,  # cmdr -> {credits, points}
+) -> bytes:
+    """
+    Renders a 2-line curve chart (PNG) like the reference screenshot:
+      - Bounties (black): bounty_points_from_sum(credits)
+      - Exploration (orange): exploration_points_from_sum(credits)
+
+    Cmdr markers are plotted ON the corresponding curve:
+      - bounty_cmdr_points on black curve
+      - exploration_cmdr_points on orange curve
+    """
+
+    # Curve samples
+    x_vals: List[float] = []
+    y_bounty: List[float] = []
+    y_expl: List[float] = []
+
+    for mcr in range(1, x_max_mcr + 1):
+        credits = mcr * 1_000_000
+        x_vals.append(float(mcr))
+        y_bounty.append(float(bounty_points_from_sum(credits, clamp_negative=clamp_negative)))
+        y_expl.append(float(exploration_points_from_sum(credits, clamp_negative=clamp_negative)))
+
+    # Current markers (totals)
+    cur_b_mcr = current_bounty_credits / 1_000_000.0
+    cur_e_mcr = current_exploration_credits / 1_000_000.0
+    cur_b_pts = bounty_points_from_sum(current_bounty_credits, clamp_negative=clamp_negative)
+    cur_e_pts = exploration_points_from_sum(current_exploration_credits, clamp_negative=clamp_negative)
+
+    fig = plt.figure(figsize=(12, 6), dpi=160)
+    ax = fig.add_subplot(111)
+
+    # Lines (match screenshot intent)
+    ax.plot(x_vals, y_bounty, linewidth=2.5, color="black", label="Bounties (M Cr)")
+    ax.plot(x_vals, y_expl, linewidth=2.5, color="orange", label="Exploration (M Cr)")
+
+    # --- Cmdr markers for bounty (on black curve) ---
+    if bounty_cmdr_points:
+        items = []
+        for name, d in bounty_cmdr_points.items():
+            try:
+                cr = float(d.get("credits", 0) or 0)
+                pts = float(d.get("points", 0) or 0)
+                items.append((name, cr, pts))
+            except Exception:
+                continue
+
+        # plot markers
+        xs = [(cr / 1_000_000.0) for _, cr, _ in items]
+        ys = [pts for _, _, pts in items]
+        ax.scatter(xs, ys, s=90, color="black", alpha=0.85, zorder=5, label="Cmdr (Bounties)")
+
+        # label top N by points
+        items.sort(key=lambda t: t[2], reverse=True)
+        label_n = min(10, len(items))
+        for i in range(label_n):
+            name, cr, pts = items[i]
+            ax.annotate(
+                name[:12],
+                xy=(cr / 1_000_000.0, pts),
+                xytext=(6, 4),
+                textcoords="offset points",
+                fontsize=9,
+                bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="black", alpha=0.8),
+            )
+
+    # --- Cmdr markers for exploration (on orange curve) ---
+    if exploration_cmdr_points:
+        items = []
+        for name, d in exploration_cmdr_points.items():
+            try:
+                cr = float(d.get("credits", 0) or 0)
+                pts = float(d.get("points", 0) or 0)
+                items.append((name, cr, pts))
+            except Exception:
+                continue
+
+        xs = [(cr / 1_000_000.0) for _, cr, _ in items]
+        ys = [pts for _, _, pts in items]
+        ax.scatter(xs, ys, s=90, color="orange", alpha=0.85, zorder=5, label="Cmdr (Exploration)")
+
+        items.sort(key=lambda t: t[2], reverse=True)
+        label_n = min(10, len(items))
+        for i in range(label_n):
+            name, cr, pts = items[i]
+            ax.annotate(
+                name[:12],
+                xy=(cr / 1_000_000.0, pts),
+                xytext=(6, -10),
+                textcoords="offset points",
+                fontsize=9,
+                bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="black", alpha=0.8),
+            )
+
+    # Total markers (optional)
+    ax.scatter([cur_b_mcr], [cur_b_pts], s=140, color="red", zorder=7, label="Total (Bounties)")
+    ax.scatter([cur_e_mcr], [cur_e_pts], s=140, color="red", zorder=7, label="Total (Exploration)")
+
+    # Labels / grid (match screenshot feel)
+    ax.set_title(title)
+    ax.set_xlabel("Credits (M Cr)")
+    ax.set_ylabel("Bucket Points")
+    ax.grid(True, which="both", linewidth=0.6, alpha=0.6)
+    ax.legend(loc="upper left")
+
+    ax.set_xlim(0, x_max_mcr)
+    y_max = max(max(y_bounty) if y_bounty else 1, max(y_expl) if y_expl else 1)
+    ax.set_ylim(0, y_max * 1.05)
 
     buf = BytesIO()
     fig.tight_layout()
@@ -574,91 +1085,84 @@ def render_bounty_curve_png(
     return buf.read()
 
 
-
 # ---------------------------
-# Flask integration
+# Flask integration (COMBINED only)
 # ---------------------------
 
 def register_bucket_v3_routes(app, db, require_api_key):
     """
-    Registers:
-        GET /api/bgs/v3/bucket/bounty
+    Combined endpoints (all metrics together):
+        GET  /api/bgs/v3/bucket
+        POST /api/bgs/v3/bucket/discord
+        GET  /api/bgs/v3/bucket/chart
     """
 
-    @app.route("/api/bgs/v3/bucket/bounty", methods=["GET"])
+    def _read_common_params():
+        period = request.args.get("period", request.form.get("period", "all"))
+        tickid = request.args.get("tickid", request.form.get("tickid"))
+        ticktime = request.args.get("ticktime", request.form.get("ticktime"))
+        systemaddress = request.args.get("systemaddress", request.form.get("systemaddress"))
+        system = request.args.get("system", request.form.get("system"))
+        faction = request.args.get("faction", request.form.get("faction"))
+
+        include_cmdr = _safe_bool(request.args.get("include_cmdr") or request.form.get("include_cmdr"), default=True)
+        clamp_negative = _safe_bool(request.args.get("clamp") or request.form.get("clamp"), default=True)
+        x_max_mcr = int(request.args.get("x_max_mcr", request.form.get("x_max_mcr", "100")))
+
+        return period, tickid, ticktime, systemaddress, system, faction, include_cmdr, clamp_negative, x_max_mcr
+
+    @app.route("/api/bgs/v3/bucket", methods=["GET"])
     @require_api_key
-    def api_bgs_v3_bucket_bounty():
-        logger = init_logger()
-        # Query params
-        period = request.args.get("period", "all")
-        tickid = request.args.get("tickid")
-        systemaddress = request.args.get("systemaddress")
-        system = request.args.get("system")
-        faction = request.args.get("faction")
+    def api_bgs_v3_bucket():
+        period, tickid, ticktime, systemaddress, system, faction, include_cmdr, clamp_negative, _ = _read_common_params()
 
-        include_cmdr = _safe_bool(request.args.get("include_cmdr"), default=True)
-        clamp_negative = _safe_bool(request.args.get("clamp"), default=True)
-
-        logger.info(f"api_bgs_v3_bucket_bounty called with period={period}, tickid={tickid}, systemaddress={systemaddress}, system={system}, faction={faction}")
-
-        data = evaluate_bounty_bucket(
+        rows = evaluate_bucket_all_metrics(
             db=db,
             period=period,
             tickid=tickid,
+            ticktime=ticktime,
             systemaddress=systemaddress,
             system=system,
             faction_filter=faction,
             include_cmdr=include_cmdr,
             clamp_negative=clamp_negative,
         )
-        try:
-            logger.info(f"api_bgs_v3_bucket_bounty returning {len(data)} rows")
-        except Exception:
-            pass
 
         return jsonify({
-            "bucket": "combat",
-            "metric": "bounty",
-            "mode": "sum_then_formula",
+            "bucket": "combined",
+            "metrics": ["bounty", "exploration"],
+            "mode": "per_cmdr_then_sum_per_metric_then_sum",
             "period": period,
             "filters": {
                 "tickid": tickid,
+                "ticktime": ticktime,
                 "systemaddress": systemaddress,
                 "system": system,
                 "faction": faction,
                 "include_cmdr": include_cmdr,
                 "clamp_negative": clamp_negative,
             },
-            "rows": data,
+            "rows": rows,
         })
 
-    @app.route("/api/bgs/v3/bucket/bounty/discord", methods=["POST"])
+    @app.route("/api/bgs/v3/bucket/discord", methods=["POST"])
     @require_api_key
-    def api_bgs_v3_bucket_bounty_discord():
-        # Wrapper: collect params and call top-level sender
+    def api_bgs_v3_bucket_discord():
         logger = init_logger()
-        # Query params (same as API)
-        period = request.args.get("period", request.form.get("period", "all"))
-        tickid = request.args.get("tickid", request.form.get("tickid"))
-        systemaddress = request.args.get("systemaddress", request.form.get("systemaddress"))
-        system = request.args.get("system", request.form.get("system"))
-        faction = request.args.get("faction", request.form.get("faction"))
-        include_cmdr = _safe_bool(request.args.get("include_cmdr") or request.form.get("include_cmdr"), default=True)
-        clamp_negative = _safe_bool(request.args.get("clamp") or request.form.get("clamp"), default=True)
-
-        logger.info(f"api_bgs_v3_bucket_bounty_discord called: period={period}")
+        period, tickid, ticktime, systemaddress, system, faction, include_cmdr, clamp_negative, _ = _read_common_params()
 
         calling_tenant = getattr(g, "tenant", None)
         if not calling_tenant:
             logger.error("No tenant found in request context (g.tenant missing)")
             return jsonify({"error": "Tenant not found in request context"}), 500
 
-        results = _send_bounty_bucket_to_discord(
+        results = _send_bucket_to_discord(
             app=app,
             db=db,
             period=period,
             tenant=calling_tenant,
             tickid=tickid,
+            ticktime=ticktime,
             systemaddress=systemaddress,
             system=system,
             faction=faction,
@@ -668,214 +1172,488 @@ def register_bucket_v3_routes(app, db, require_api_key):
 
         return jsonify({"results": results})
 
-
-    @app.route("/api/bgs/v3/bucket/bounty/chart", methods=["GET"])
+    @app.route("/api/bgs/v3/bucket/chart", methods=["GET"])
     @require_api_key
-    def api_bgs_v3_bucket_bounty_chart():
+    def api_bgs_v3_bucket_chart():
         period = request.args.get("period", "all")
         tickid = request.args.get("tickid")
+        ticktime = request.args.get("ticktime")
         systemaddress = request.args.get("systemaddress")
         system = request.args.get("system")
-        faction = request.args.get("faction")  # required to pick one line reliably
+        faction = request.args.get("faction")
 
         clamp_negative = _safe_bool(request.args.get("clamp"), default=True)
         x_max_mcr = int(request.args.get("x_max_mcr", "100"))
 
-        # Evaluate (same logic), then select the requested row (or best match)
-        rows = evaluate_bounty_bucket(
+        # You need both evaluations present:
+        bounty_rows = evaluate_bounty_bucket(
             db=db,
             period=period,
             tickid=tickid,
+            ticktime=ticktime,
             systemaddress=systemaddress,
             system=system,
             faction_filter=faction,
-            include_cmdr=False,
+            include_cmdr=True,
             clamp_negative=clamp_negative,
         )
 
-        if not rows:
+        exploration_rows = evaluate_exploration_bucket(
+            db=db,
+            period=period,
+            tickid=tickid,
+            ticktime=ticktime,
+            systemaddress=systemaddress,
+            system=system,
+            faction_filter=faction,
+            include_cmdr=True,
+            clamp_negative=clamp_negative,
+        )
+
+        # pick a target row (same system/faction) - prefer bounty row if exists, else exploration
+        if bounty_rows:
+            target = bounty_rows[0]
+        elif exploration_rows:
+            target = exploration_rows[0]
+        else:
             return jsonify({"error": "No data found for the given filters."}), 404
 
-        # If faction provided -> rows should already be single-group; otherwise take top row
-        row = rows[0]
-        current_credits = int(row.get("bounty_credits", 0))
+        sysname = target.get("system", "?")
+        facname = target.get("faction", "?")
 
-        title = f"Bounties Curve – {row.get('system','?')} / {row.get('faction','?')}"
+        # map rows by (systemaddress,faction) to combine the correct pair
+        def _key(r):
+            return (r.get("systemaddress"), r.get("faction"))
 
-        pop = row.get("population")
-        pop = int(pop) if isinstance(pop, (int, float)) and int(pop) > 0 else None
+        b_map = {_key(r): r for r in bounty_rows}
+        e_map = {_key(r): r for r in exploration_rows}
 
-        png_bytes = render_bounty_curve_png(
-            current_bounty_credits=current_credits,
-            population=pop,
+        k = _key(target)
+        b_row = b_map.get(k, {})
+        e_row = e_map.get(k, {})
+
+        bounty_credits = int(b_row.get("bounty_credits", 0) or 0)
+        expl_credits = int(e_row.get("exploration_credits", 0) or 0)
+
+        bounty_cmdr = b_row.get("cmdrs") if isinstance(b_row.get("cmdrs"), dict) else None
+        expl_cmdr = e_row.get("cmdrs") if isinstance(e_row.get("cmdrs"), dict) else None
+
+        title = f"Bucket Curves – {sysname} / {facname}"
+
+        png_bytes = render_bucket_curves_png(
+            current_bounty_credits=bounty_credits,
+            current_exploration_credits=expl_credits,
             clamp_negative=clamp_negative,
             x_max_mcr=x_max_mcr,
             title=title,
+            bounty_cmdr_points=bounty_cmdr,
+            exploration_cmdr_points=expl_cmdr,
         )
 
         return Response(png_bytes, mimetype="image/png")
 
 
-    # end register_bucket_v3_routes
-
-
-# Internal implementation that accepts filter parameters (kept for the endpoint and programmatic calls)
-def _send_bounty_bucket_to_discord(
+def _send_bucket_to_discord(
     app,
     db,
     period="all",
     tenant=None,
     tickid=None,
+    ticktime=None,
     systemaddress=None,
     system=None,
     faction=None,
     include_cmdr=True,
     clamp=True
 ):
+    """
+    Discord sender (combined):
+    - loads bounty + exploration ONCE
+    - merges by (systemaddress,faction)
+    - sends one message per system
+    - attaches combined 2-line chart (bounty + exploration) with Cmdr markers on each line
+    """
     logger = init_logger()
 
-    # Generate data using same evaluation function
-    data = evaluate_bounty_bucket(
+    # 1) Load BOTH buckets once (cmdr included to draw markers)
+    bounty_rows = evaluate_bounty_bucket(
         db=db,
         period=period,
         tickid=tickid,
+        ticktime=ticktime,
         systemaddress=systemaddress,
         system=system,
         faction_filter=faction,
         include_cmdr=include_cmdr,
         clamp_negative=clamp,
+        enrich_population=False,  # we enrich once after merge
     )
 
-    # Partition results by system
-    systems = {}
-    for row in data:
-        sysname = row.get("system") or "Unknown"
-        systems.setdefault(sysname, []).append(row)
+    exploration_rows = evaluate_exploration_bucket(
+        db=db,
+        period=period,
+        tickid=tickid,
+        ticktime=ticktime,
+        systemaddress=systemaddress,
+        system=system,
+        faction_filter=faction,
+        include_cmdr=include_cmdr,
+        clamp_negative=clamp,
+        enrich_population=False,  # we enrich once after merge
+    )
 
-    # Determine tenants to send to
+    def _key(r: Dict[str, Any]) -> Tuple[Optional[str], str]:
+        return (r.get("systemaddress"), (r.get("faction") or "").strip())
+
+    b_map = {_key(r): r for r in bounty_rows}
+    e_map = {_key(r): r for r in exploration_rows}
+
+    all_keys = set(b_map.keys()) | set(e_map.keys())
+
+    # 2) Merge by (systemaddress,faction)
+    merged_rows: List[Dict[str, Any]] = []
+    for k in all_keys:
+        br = b_map.get(k) or {}
+        er = e_map.get(k) or {}
+
+        # prefer system name from bounty row, else exploration row
+        sysname = br.get("system") or er.get("system")
+        sysaddr = (br.get("systemaddress") or er.get("systemaddress"))
+        fac = (br.get("faction") or er.get("faction") or "").strip()
+
+        bounty_credits = int(br.get("bounty_credits", 0) or 0)
+        bounty_points = float(br.get("bounty_points", 0.0) or 0.0)
+        vouchers = int(br.get("vouchers", 0) or 0)
+
+        expl_credits = int(er.get("exploration_credits", 0) or 0)
+        expl_points = float(er.get("exploration_points", 0.0) or 0.0)
+        sales = int(er.get("sales", 0) or 0)
+
+        # merge ticks/times/ts
+        tickids = sorted(set((br.get("tickids") or []) + (er.get("tickids") or [])))
+        ticktimes = sorted(set((br.get("ticktimes") or []) + (er.get("ticktimes") or [])))
+
+        ft_candidates = [x for x in [br.get("first_ts"), er.get("first_ts")] if x]
+        lt_candidates = [x for x in [br.get("last_ts"), er.get("last_ts")] if x]
+        first_ts = min(ft_candidates) if ft_candidates else None
+        last_ts = max(lt_candidates) if lt_candidates else None
+
+        # cmdr merge
+        cmdrs_combined: Dict[str, Dict[str, Any]] = {}
+        if include_cmdr:
+            b_cmdrs = br.get("cmdrs") if isinstance(br.get("cmdrs"), dict) else {}
+            e_cmdrs = er.get("cmdrs") if isinstance(er.get("cmdrs"), dict) else {}
+
+            for cmdr_name, d in b_cmdrs.items():
+                cmdrs_combined.setdefault(cmdr_name, {
+                    "bounty_credits": 0, "bounty_points": 0.0,
+                    "exploration_credits": 0, "exploration_points": 0.0,
+                })
+                cmdrs_combined[cmdr_name]["bounty_credits"] += int(d.get("credits", 0) or 0)
+                cmdrs_combined[cmdr_name]["bounty_points"] += float(d.get("points", 0.0) or 0.0)
+
+            for cmdr_name, d in e_cmdrs.items():
+                cmdrs_combined.setdefault(cmdr_name, {
+                    "bounty_credits": 0, "bounty_points": 0.0,
+                    "exploration_credits": 0, "exploration_points": 0.0,
+                })
+                cmdrs_combined[cmdr_name]["exploration_credits"] += int(d.get("credits", 0) or 0)
+                cmdrs_combined[cmdr_name]["exploration_points"] += float(d.get("points", 0.0) or 0.0)
+
+            for _, d in cmdrs_combined.items():
+                d["total_credits"] = int(d.get("bounty_credits", 0) or 0) + int(d.get("exploration_credits", 0) or 0)
+                d["total_points"] = float(d.get("bounty_points", 0.0) or 0.0) + float(d.get("exploration_points", 0.0) or 0.0)
+
+        row = {
+            "system": sysname,
+            "systemaddress": sysaddr,
+            "faction": fac,
+
+            "bounty_credits": bounty_credits,
+            "bounty_points": bounty_points,
+            "vouchers": vouchers,
+
+            "exploration_credits": expl_credits,
+            "exploration_points": expl_points,
+            "sales": sales,
+
+            "total_credits": bounty_credits + expl_credits,
+            "total_points": bounty_points + expl_points,
+
+            "first_ts": first_ts,
+            "last_ts": last_ts,
+            "tickids": tickids,
+            "ticktimes": ticktimes,
+        }
+
+        if include_cmdr:
+            row["cmdrs"] = cmdrs_combined
+
+        merged_rows.append(row)
+
+    # 3) Enrich population once per system, + effect on combined points
+    try:
+        sysnames = sorted({(r.get("system") or None) for r in merged_rows if r.get("system")})
+        pop_map = get_population_map_from_eddn(sysnames)
+
+        for r in merged_rows:
+            sysn = r.get("system")
+            r["population"] = pop_map.get(sysn) if sysn else None
+            try:
+                pop = r.get("population")
+                if pop is not None and isinstance(pop, (int, float)) and float(pop) > 0:
+                    r["bgs_effect"] = round(float(bgs_effect(float(r.get("total_points", 0.0) or 0.0), float(pop))), 6)
+                else:
+                    r["bgs_effect"] = None
+            except Exception:
+                r["bgs_effect"] = None
+    except Exception:
+        for r in merged_rows:
+            r["population"] = None
+            r["bgs_effect"] = None
+
+    # Sort merged rows by total_points desc then total_credits desc
+    merged_rows.sort(
+        key=lambda x: (float(x.get("total_points", 0.0) or 0.0), int(x.get("total_credits", 0) or 0)),
+        reverse=True,
+    )
+
+    # 4) Group: one message per system
+    systems: Dict[str, List[Dict[str, Any]]] = {}
+    for r in merged_rows:
+        sysname = r.get("system") or "Unknown"
+        systems.setdefault(sysname, []).append(r)
+
     tenants = [tenant] if tenant is not None else get_tenants()
-
-    logger.info(f"Targeting {len(tenants)} tenant(s) for discord dispatch")
+    logger.info(f"Targeting {len(tenants)} tenant(s) for discord dispatch (systems={len(systems)})")
     results = []
 
+    def _fmt_int(v):
+        try:
+            return f"{int(v):,}"
+        except Exception:
+            return "n/a"
+
+    def _fmt_float(v, digits=2):
+        try:
+            return f"{float(v):.{digits}f}"
+        except Exception:
+            return "n/a"
+
     for t in tenants:
-        # webhook_url = get_discord_webhook(t, "bullis")
-        webhook_url = get_discord_webhook(t, "bgs")
+        webhook_url = get_discord_webhook(t, "bullis")
         if not webhook_url:
-            logger.warning(f"No 'bullis' webhook for tenant {t.get('name')}")
+            logger.warning(f"No webhook for tenant {t.get('name')}")
             results.append({"tenant": t.get("name"), "status": "no_webhook"})
             continue
 
         period_label = period if period != "all" else "All Time"
-        tick_label = tickid if tickid else period_label
+        tick_label = ticktime or tickid or period_label
 
-        header_msg = (
-            "## BGS v3 - 'The 4 Bucket' Evaluation\n"
-            "This evaluation applies the **BGS Bucket Model** by aggregating bounty credits per system and faction first and then converting the total into influence points using a logarithmic function, reflecting diminishing returns and soft caps. The approach follows the **four-bucket concept (combat, trade, exploration, missions)** described in *The BGS Guide* (see *“The Bucket Model”*, page 36 ff.), where balanced activity across multiple buckets is more effective than focusing on a single one (<https://sinc.science/bgsguide.pdf>).\n\n"
-            "Note: This is **Phase 1** focusing on the **Combat/Bounty Bucket** using RedeemVoucherEvents of type 'bounty'.\n\n"
-            f"Tenant: **{t.get('name')}**\n"
-            f"Period/Tick: **{tick_label}**\n"
-        )
+        # --- SEND HEADER MESSAGE FIRST (per tenant) ---
+        try:
+            header_msg = (
+                "## BGS v3 - 'The 4 Bucket' Evaluation\n"
+                "This evaluation applies the **BGS Bucket Model** by aggregating bounty credits per system and faction first and then converting the total into influence points using a logarithmic function, reflecting diminishing returns and soft caps. The approach follows the **four-bucket concept (combat, trade, exploration, missions)** described in *The BGS Guide* (see *\"The Bucket Model\"*, page 36 ff.), where balanced activity across multiple buckets is more effective than focusing on a single one (<https://sinc.science/bgsguide.pdf>).\n\n"
+                "Note: This is **Phase 1** focusing on the **Combat/Bounty Bucket** using RedeemVoucherEvents of type 'bounty'.\n\n"
+                f"Tenant: **{t.get('name')}**\n"
+                f"Period/Tick: **{tick_label}**\n"
+            )
 
-        header_sent = False
+            resp_hdr = requests.post(
+                webhook_url,
+                json={"content": header_msg, "allowed_mentions": {"parse": []}},
+                timeout=20,
+            )
+            if resp_hdr.status_code not in (200, 204):
+                logger.error(f"Discord webhook header error ({resp_hdr.status_code}): {resp_hdr.text}")
+                results.append({"tenant": t.get("name"), "system": None, "status": "header_discord_error", "code": resp_hdr.status_code})
+            else:
+                results.append({"tenant": t.get("name"), "system": None, "status": "header_sent"})
+        except Exception as e:
+            logger.exception(f"Discord header send failed for tenant={t.get('name')}")
+            results.append({"tenant": t.get("name"), "system": None, "status": "header_exception", "error": str(e)})
 
         for system_name, rows in systems.items():
-            # Sort factions by impact
+            # within system, keep rows sorted by combined points
             rows_sorted = sorted(
                 rows,
-                key=lambda r: (
-                    float(r.get("bounty_points", 0.0) or 0.0),
-                    int(r.get("bounty_credits", 0) or 0),
-                ),
+                key=lambda r: (float(r.get("total_points", 0.0) or 0.0), int(r.get("total_credits", 0) or 0)),
                 reverse=True,
             )
 
-            top_row = rows_sorted[0] if rows_sorted else None
-            total_credits = sum(r.get("bounty_credits", 0) for r in rows_sorted)
+            # if caller filtered faction, keep that faction if present
+            if faction:
+                rows_sorted = [r for r in rows_sorted if (r.get("faction") or "") == faction] or rows_sorted
 
-            lines = []
-            if not header_sent:
-                lines.append(header_msg)
-                header_sent = True
-            else:
-                lines.append("\u200B")
+            if not rows_sorted:
+                continue
 
-            lines.append(f"💰🏴‍☠️ **{system_name}**")
-            lines.append(f"Total bounty credits: **{total_credits:,} Cr**")
-            # Show population for the system (taken from first available row). If missing or 0, show hint.
-            pop_val = None
-            for _r in rows_sorted:
-                p = _r.get("population")
-                if p is not None:
-                    pop_val = p
-                    break
+            # System totals across included factions
+            sys_total_points = sum(float(r.get("total_points", 0.0) or 0.0) for r in rows_sorted)
+            sys_total_credits = sum(int(r.get("total_credits", 0) or 0) for r in rows_sorted)
+            sys_bounty_points = sum(float(r.get("bounty_points", 0.0) or 0.0) for r in rows_sorted)
+            sys_expl_points = sum(float(r.get("exploration_points", 0.0) or 0.0) for r in rows_sorted)
+            sys_bounty_credits = sum(int(r.get("bounty_credits", 0) or 0) for r in rows_sorted)
+            sys_expl_credits = sum(int(r.get("exploration_credits", 0) or 0) for r in rows_sorted)
 
-            if pop_val is None or (isinstance(pop_val, (int, float)) and int(pop_val) == 0):
-                lines.append("Population: **unknown / not available**")
-                lines.append("_Note: Population not determined — BGS Effect values cannot be calculated._")
-            else:
-                try:
-                    lines.append(f"Population: **{int(pop_val):,}**")
-                except Exception:
-                    lines.append("Population: **unknown**")
+            pop_val = rows_sorted[0].get("population")
+            pop_txt = _fmt_int(pop_val) if pop_val else "unknown"
+
+            sys_effect_total = None
+            try:
+                if pop_val and isinstance(pop_val, (int, float)) and float(pop_val) > 0:
+                    sys_effect_total = bgs_effect(float(sys_total_points), float(pop_val))
+            except Exception:
+                sys_effect_total = None
+
+            # Cmdr totals across factions (combined) + per-metric dicts for chart markers
+            cmdr_totals: Dict[str, Dict[str, Any]] = {}
+            bounty_cmdr_points: Dict[str, Dict[str, Any]] = {}
+            exploration_cmdr_points: Dict[str, Dict[str, Any]] = {}
+
+            if include_cmdr:
+                for r in rows_sorted:
+                    cmdrs = r.get("cmdrs") if isinstance(r.get("cmdrs"), dict) else {}
+                    for cmdr_name, d in cmdrs.items():
+                        ct = cmdr_totals.setdefault(cmdr_name, {
+                            "bounty_credits": 0, "bounty_points": 0.0,
+                            "exploration_credits": 0, "exploration_points": 0.0,
+                            "total_credits": 0, "total_points": 0.0,
+                        })
+                        ct["bounty_credits"] += int(d.get("bounty_credits", 0) or 0)
+                        ct["bounty_points"] += float(d.get("bounty_points", 0.0) or 0.0)
+                        ct["exploration_credits"] += int(d.get("exploration_credits", 0) or 0)
+                        ct["exploration_points"] += float(d.get("exploration_points", 0.0) or 0.0)
+
+                for name, d in cmdr_totals.items():
+                    d["total_credits"] = int(d.get("bounty_credits", 0) or 0) + int(d.get("exploration_credits", 0) or 0)
+                    d["total_points"] = float(d.get("bounty_points", 0.0) or 0.0) + float(d.get("exploration_points", 0.0) or 0.0)
+
+                    # per-metric point dicts for chart markers (MUST be {credits, points})
+                    if int(d.get("bounty_credits", 0) or 0) > 0:
+                        bounty_cmdr_points[name] = {
+                            "credits": int(d.get("bounty_credits", 0) or 0),
+                            "points": float(d.get("bounty_points", 0.0) or 0.0),
+                        }
+                    if int(d.get("exploration_credits", 0) or 0) > 0:
+                        exploration_cmdr_points[name] = {
+                            "credits": int(d.get("exploration_credits", 0) or 0),
+                            "points": float(d.get("exploration_points", 0.0) or 0.0),
+                        }
+
+            active_cmdrs = len(cmdr_totals)
+
+            # ---------------------------
+            # Build discord content (combined tables)
+            # ---------------------------
+            lines: List[str] = []
+            lines.append(f"## 📊 BGS Bucket Eval — {system_name}")
+            #lines.append(f"Tenant: **{t.get('name')}**")
+            #lines.append(f"Period/Tick: **{tick_label}**")
+            #lines.append("Curves: **Bounties (black) + Exploration (orange)**")
+            if faction:
+                lines.append(f"Faction filter: **{faction}**")
+            lines.append("")
+
+            # B) System Overview
+            lines.append("**:star: System Overview**")
             lines.append("```text")
-            # Single header line including BGS Effect column
-            lines.append(f"{'Faction':<32} | {'Credits':>14} | {'Points':>8} | {'BGS Eff':>9}")
-            lines.append("-" * 74)
-
-            for r in rows_sorted:
-                fac = (r.get("faction") or "?")[:32]
-                cr = int(r.get("bounty_credits", 0) or 0)
-                pts = float(r.get("bounty_points", 0.0) or 0.0)
-                # bgs_effect comes from evaluate_bounty_bucket; may be None
-                bgs_val = r.get("bgs_effect")
-                if bgs_val is None:
-                    bgs_str = "-"
-                else:
-                    try:
-                        bgs_str = f"{float(bgs_val):.2f}"
-                    except Exception:
-                        bgs_str = "-"
-
-                lines.append(f"{fac:<32} | {cr:>14,} | {pts:>8.2f} | {bgs_str:>9}")
-
+            lines.append(f"{'Population':<16} | {pop_txt:>15}")
+            lines.append(f"{'Active Cmdrs':<16} | {_fmt_int(active_cmdrs):>15}")
+            lines.append(f"{'Total Credits':<16} | {_fmt_int(sys_total_credits):>15}")
+            lines.append(f"{'Bounty Credits':<16} | {_fmt_int(sys_bounty_credits):>15}")
+            lines.append(f"{'Explr Credits':<16} | {_fmt_int(sys_expl_credits):>15}")
+            lines.append(f"{'Bounty Effort':<16} | {_fmt_float(sys_bounty_points, 2):>15}")
+            lines.append(f"{'Explr Effort':<16} | {_fmt_float(sys_expl_points, 2):>15}")
+            lines.append("-" * 34)
+            lines.append(f"{'Total Effort':<16} | {_fmt_float(sys_total_points, 2):>15}")
+            lines.append(f"{'Total Effect':<16} | {('-' if sys_effect_total is None else _fmt_float(sys_effect_total, 2)):>15}")
             lines.append("```")
+            lines.append("Calculated using the BGS Bucket Model (logarithmic scaling with diminishing returns).")
+            lines.append("Refer to <https://sinc.science/bgsguide.pdf> page 39/40 for details.")
+            lines.append("")
 
-            content = "\n".join(lines) # + "\n\u200B"
+            # A) Cmdr Contributions (combined + per-metric)
+            lines.append("**:astronaut: Cmdr Contributions**")
+            lines.append("```text")
+            lines.append(f"{'Cmdr':<18} | {'B MCr':>8} | {'B Pt':>7} | {'E MCr':>8} | {'E Pt':>7} | {'T Pt':>7}")
+            lines.append("-" * 70)
 
-            # ---------- Render chart for top faction ----------
+            cmdr_items = []
+            for cmdr_name, d in cmdr_totals.items():
+                cmdr_items.append((
+                    cmdr_name,
+                    int(d.get("bounty_credits", 0) or 0),
+                    float(d.get("bounty_points", 0.0) or 0.0),
+                    int(d.get("exploration_credits", 0) or 0),
+                    float(d.get("exploration_points", 0.0) or 0.0),
+                    float(d.get("total_points", 0.0) or 0.0),
+                ))
+            cmdr_items.sort(key=lambda x: x[5], reverse=True)
+
+            max_rows = 25
+            for cmdr_name, bcr, bpt, ecr, ept, tpt in cmdr_items[:max_rows]:
+                lines.append(
+                    f"{cmdr_name[:18]:<18} | {bcr/1_000_000:>8.2f} | {bpt:>7.2f} | {ecr/1_000_000:>8.2f} | {ept:>7.2f} | {tpt:>7.2f}"
+                )
+            if len(cmdr_items) > max_rows:
+                lines.append(f"... ({len(cmdr_items) - max_rows} more cmdrs omitted)")
+            lines.append("```")
+            lines.append("")
+
+            # C) Faction Breakdown within system
+            lines.append("**:classical_building: Faction Breakdown (within system)**")
+            lines.append("```text")
+            lines.append(f"{'Faction':<22} | {'B Pt':>7} | {'E Pt':>7} | {'T Pt':>7} | {'Share':>6}")
+            lines.append("-" * 61)
+
+            denom = sys_total_points if sys_total_points > 0 else 1.0
+            for r in rows_sorted[:25]:
+                fac = (r.get("faction") or "?")[:22]
+                bp = float(r.get("bounty_points", 0.0) or 0.0)
+                ep = float(r.get("exploration_points", 0.0) or 0.0)
+                tp = float(r.get("total_points", 0.0) or 0.0)
+                share = (tp / denom) * 100.0
+                lines.append(f"{fac:<22} | {bp:>7.2f} | {ep:>7.2f} | {tp:>7.2f} | {share:>5.1f}%")
+            if len(rows_sorted) > 25:
+                lines.append(f"... ({len(rows_sorted) - 25} more factions omitted)")
+            lines.append("```")
+            lines.append("")
+            #lines.append("_📎 Chart attached below: curves + Cmdr markers on each curve._")
+
+            content = "\n".join(lines)
+
+            # ---------------------------
+            # Render + attach chart (2 curves + cmdr markers)
+            # ---------------------------
             file_payload = None
-            if top_row:
-                try:
-                    current_credits = int(top_row.get("bounty_credits", 0) or 0)
-                    title = f"Bounties Curve – {system_name} / {top_row.get('faction', '?')}"
-                    pop = top_row.get("population")
-                    pop = int(pop) if isinstance(pop, (int, float)) and int(pop) > 0 else None
-                    png_bytes = render_bounty_curve_png(
-                        current_bounty_credits=current_credits,
-                        population=pop,
-                        clamp_negative=clamp,
-                        x_max_mcr=100,
-                        title=title,
-                    )
-                    safe_sys = "".join(
-                        c for c in (system_name or "system")
-                        if c.isalnum() or c in ("-", "_")
-                    )[:40]
-                    filename = f"bounty_bucket_{safe_sys}.png"
-                    file_payload = (filename, png_bytes, "image/png")
-                except Exception as e:
-                    logger.warning(f"Chart rendering failed for {system_name}: {e}")
+            try:
+                title = f"Bucket Curves – {system_name}"
+                png_bytes = render_bucket_curves_png(
+                    current_bounty_credits=int(sys_bounty_credits),
+                    current_exploration_credits=int(sys_expl_credits),
+                    clamp_negative=clamp,
+                    x_max_mcr=100,
+                    title=title,
+                    bounty_cmdr_points=bounty_cmdr_points if bounty_cmdr_points else None,
+                    exploration_cmdr_points=exploration_cmdr_points if exploration_cmdr_points else None,
+                )
 
-            # ---------- Send Discord message ----------
+                safe_sys = "".join(c for c in (system_name or "system") if c.isalnum() or c in ("-", "_"))[:40]
+                filename = f"bucket_curves_{safe_sys}.png"
+                file_payload = (filename, png_bytes, "image/png")
+            except Exception as e:
+                logger.warning(f"Chart rendering failed for {system_name}: {e}")
+                file_payload = None
+
+            # ---------------------------
+            # Send message
+            # ---------------------------
             try:
                 if file_payload:
-                    # IMPORTANT: For webhook + file upload, Discord expects JSON in "payload_json"
                     files = {"file": file_payload}
-                    payload = {
-                        "content": content,
-                        "allowed_mentions": {"parse": []},
-                    }
+                    payload = {"content": content, "allowed_mentions": {"parse": []}}
                     resp = requests.post(
                         webhook_url,
                         data={"payload_json": json.dumps(payload)},
@@ -885,10 +1663,7 @@ def _send_bounty_bucket_to_discord(
                 else:
                     resp = requests.post(
                         webhook_url,
-                        json={
-                            "content": content,
-                            "allowed_mentions": {"parse": []},
-                        },
+                        json={"content": content, "allowed_mentions": {"parse": []}},
                         timeout=20
                     )
 
@@ -898,23 +1673,23 @@ def _send_bounty_bucket_to_discord(
                         "tenant": t.get("name"),
                         "system": system_name,
                         "status": "discord_error",
-                        "code": resp.status_code,
+                        "code": resp.status_code
                     })
                 else:
                     results.append({
                         "tenant": t.get("name"),
                         "system": system_name,
                         "status": "sent",
-                        "chart_attached": bool(file_payload),
+                        "chart_attached": bool(file_payload)
                     })
 
             except Exception as e:
-                logger.exception(f"Discord send failed for tenant={t.get('name')} system={system_name}")
+                logger.exception(f"Discord send failed tenant={t.get('name')} system={system_name}")
                 results.append({
                     "tenant": t.get("name"),
                     "system": system_name,
                     "status": "exception",
-                    "error": str(e),
+                    "error": str(e)
                 })
 
     return results

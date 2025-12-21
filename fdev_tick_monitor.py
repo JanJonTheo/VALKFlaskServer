@@ -107,7 +107,7 @@ def start_tick_watch_scheduler():
         """Call the Flask endpoint /api/bgs/v3/bucket/bounty/discord for each tenant with tickid=prev_tick.
         Uses the tenant's apikey (and api_version) in headers so the Flask app resolves g.tenant server-side.
         """
-        logging.info(f"[TickPollZoy] send_bucket_eval_for_prev_tick: triggering bucket eval for tick {prev_tick} on all tenants")
+        logging.info(f"[TickPollZoy] send_bucket_eval_for_prev_tick: triggering bucket eval for ticktime {prev_tick} on all tenants")
 
         flask_server_url = os.getenv("FLASK_SERVER_URL_PROD")
         if not flask_server_url:
@@ -129,7 +129,7 @@ def start_tick_watch_scheduler():
                 "apikey": api_key,
                 "apiversion": api_version
             }
-            params = {"tickid": prev_tick}
+            params = {"ticktime": prev_tick}
 
             try:
                 logging.info(f"[TickPollZoy] POST {url} for tenant {tenant_name} tickid={prev_tick}")

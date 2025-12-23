@@ -1,21 +1,56 @@
 # bgs_v3_bucket_eval.py
 # -*- coding: utf-8 -*-
 """
-VALK BGS v3 - Bucket Model Evaluator (Phase 1: Combat/Bounty Bucket)
+VALK BGS v3 - "The 4 Bucket" Evaluation (Phase 2: Persisted Runs)
 
-- Liest RedeemVoucherEvents (Type='bounty')
-- Nimmt als *einzige* Faction-Quelle das JSON-Feld RedeemVoucherEvent.factions (Factions[])
-- Aggregiert zuerst Credits pro (SystemAddress, Faction) über den gewählten Zeitraum/Tick
-- Wendet *danach* die Bucket-Formel auf die SUMME an:
-    bounty_points = 1.33 * log2( sum_bounty / 450000 )
+What this module does
+---------------------
+This module evaluates *player activity* and converts it into *bucket effort points* following the
+Bucket Model concept described in "The BGS Guide" (Bucket Model, p. 36 ff.).
 
-Integration:
+Current scope (Alpha)
+---------------------
+- Buckets implemented here:
+  - Combat (Bounties via RedeemVoucherEvent, Type='bounty', expanded from rv.factions JSON list)
+  - Exploration (SellExplorationDataEvent + MultiSellExplorationDataEvent, grouped by station_faction)
+- The evaluator aggregates *per Cmdr first*, converts credits to points using a logarithmic function,
+  and then sums points (reflecting diminishing returns / soft caps).
+- Results are merged by (systemaddress, faction) and can be sent to Discord with an attached chart
+  showing the two bucket curves and Cmdr markers.
+
+Tick handling (IMPORTANT)
+-------------------------
+- We use **ticktime only** (string). tickid is legacy and can still be used as a filter,
+  but all persistence keys are based on ticktime.
+- For persistence we resolve ticktime in this order:
+  1) request parameter "ticktime"
+  2) fdev_tick_monitor.last_tick["value"] (server process tick source)
+
+Phase 2: Persistence (ticktime-only)
+------------------------------------
+When calling the Discord endpoint, evaluation results are persisted by default into the tenant DB:
+- bgs_eval_run     (one row per evaluation call)
+- bgs_eval_result  (upsert per UNIQUE(ticktime, system_name, faction))
+
+Persistence can be disabled per call:
+- persist=0 / persist=false / persist=off  -> no DB writes
+This enables manual re-runs multiple times a day without creating additional persisted runs.
+
+Integration
+-----------
     from bgs_v3_bucket_eval import register_bucket_v3_routes
     register_bucket_v3_routes(app, db, require_api_key)
 
-Hinweise:
-- Zeitstempel sind im DB-Model als String (ISO8601 "....Z"). Lexikographisch filterbar per BETWEEN.
-- Wenn RedeemVoucherEvent.systemaddress/starsystem nicht gesetzt sind, wird auf Event.systemaddress/starsystem fallbacked.
+Endpoints
+---------
+- GET  /api/bgs/v3/bucket
+- POST /api/bgs/v3/bucket/discord        (persist enabled by default; disable via persist=0)
+- GET  /api/bgs/v3/bucket/chart
+
+Notes
+-----
+- DB timestamps are stored as ISO8601 strings "...Z" and are lexicographically filterable via BETWEEN.
+- Population is enriched from EDDN DB (EDDN_DATABASE) if configured; otherwise population/effect are None.
 """
 
 from __future__ import annotations
@@ -47,11 +82,24 @@ import matplotlib.pyplot as plt
 # Reuse tenant helpers from fac_shoutout_scheduler
 from fac_shoutout_scheduler import get_discord_webhook
 from fac_shoutout_scheduler import get_tenants
+
 # Import send_discord_message helper (optional)
 try:
     from fac_shoutout_scheduler import send_discord_message
 except Exception:
     send_discord_message = None
+
+# Phase 2 persistence (ticktime-only)
+try:
+    from fdev_tick_monitor import last_tick as _last_tick
+except Exception:
+    _last_tick = {"value": ""}
+
+try:
+    from models import BGSEvalRun, BGSEvalResult
+except Exception:
+    BGSEvalRun = None
+    BGSEvalResult = None
 
 
 # ---------------------------
@@ -70,7 +118,7 @@ def init_logger():
 
     # First-time initialization
     logger.setLevel(logging.INFO)
-    log_handler = RotatingFileHandler(log_path, maxBytes=128 * 1024 * 1024, backupCount=3)
+    log_handler = RotatingFileHandler(log_path, maxBytes=4 * 1024 * 1024, backupCount=10)
     stream_handler = logging.StreamHandler()
     formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
     log_handler.setFormatter(formatter)
@@ -83,6 +131,197 @@ def init_logger():
     logger._initialized = True
     logger.info(f"Log Path: {log_path.resolve()}")
     return logger
+
+
+# ---------------------------
+# Helpers
+# ---------------------------
+
+def _utcnow_iso() -> str:
+    return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+
+def _safe_bool(v: Optional[str], default: bool = False) -> bool:
+    if v is None:
+        return default
+    return v.strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def _resolve_ticktime_for_persist(request_ticktime: Optional[str], logger) -> Optional[str]:
+    """
+    Persistierung erfolgt ausschließlich über ticktime (String).
+    Priorität:
+      1) ticktime Parameter (Request)
+      2) fdev_tick_monitor.last_tick["value"] (Serverprozess)
+    """
+    tt = (request_ticktime or "").strip()
+    if tt:
+        logger.info(f"[EVAL_PERSIST] ticktime resolved from request_ticktime: {tt}")
+        return tt
+
+    try:
+        tt2 = (_last_tick or {}).get("value") or ""
+        tt2 = str(tt2).strip()
+        if tt2:
+            logger.info(f"[EVAL_PERSIST] ticktime resolved from fdev_tick_monitor.last_tick: {tt2}")
+            return tt2
+    except Exception as e:
+        logger.warning(f"[EVAL_PERSIST] ticktime resolve from last_tick failed: {e}")
+
+    logger.warning("[EVAL_PERSIST] No ticktime available; persistence skipped.")
+    return None
+
+
+def _persist_bgs_eval_results_ticktime_only(
+    db,
+    *,
+    ticktime: str,
+    eval_type: str,
+    version: str,
+    merged_rows: List[Dict[str, Any]],
+    systems_cmdr_totals: Dict[str, Dict[str, Any]],
+    logger
+) -> bool:
+    """
+    Persist Phase 2 results into:
+      - BGSEvalRun (one row per call)
+      - BGSEvalResult (upsert per (ticktime, system_name, faction))
+
+    total_effect:
+      - Prefer computed bgs_effect if present
+      - Else fallback to total_points
+
+    breakdown_json:
+      - stores credits/points/effect/population etc.
+
+    cmdr_json:
+      - aggregated Cmdr totals per system (already computed later in _send_bucket_to_discord)
+    """
+    if BGSEvalRun is None or BGSEvalResult is None:
+        logger.warning("[EVAL_PERSIST] Models BGSEvalRun/BGSEvalResult not available (import failed); skip.")
+        return False
+
+    if not ticktime or not isinstance(ticktime, str):
+        logger.warning("[EVAL_PERSIST] Invalid ticktime; skip.")
+        return False
+
+    created_at = _utcnow_iso()
+
+    try:
+        logger.info(
+            "[EVAL_PERSIST] Start: ticktime='%s' eval_type='%s' version='%s' rows=%d systems=%d",
+            ticktime, eval_type, version, len(merged_rows or []), len(systems_cmdr_totals or {})
+        )
+
+        # 1) Run header
+        run = BGSEvalRun(
+            ticktime=ticktime,
+            created_at=created_at,
+            eval_type=eval_type,
+            version=version,
+            meta_json=json.dumps({
+                "source": "bgs_v3_bucket_eval",
+                "metrics": ["bounty", "exploration"],
+                "mode": "per_cmdr_then_sum_per_metric_then_sum",
+                "rows": int(len(merged_rows or [])),
+                "systems": int(len(systems_cmdr_totals or {})),
+            }, ensure_ascii=False)
+        )
+        db.session.add(run)
+
+        inserted = 0
+        updated = 0
+        skipped = 0
+
+        # 2) Results
+        for r in (merged_rows or []):
+            system_name = (r.get("system") or "").strip()
+            faction = (r.get("faction") or "").strip()
+            if not system_name or not faction:
+                skipped += 1
+                continue
+
+            # choose "total_effect"
+            te = r.get("bgs_effect")
+            if te is None:
+                te = r.get("total_points")
+            try:
+                total_effect = float(te or 0.0)
+            except Exception:
+                total_effect = 0.0
+
+            breakdown = {
+                "systemaddress": r.get("systemaddress"),
+                "population": r.get("population"),
+                "bounty_credits": int(r.get("bounty_credits", 0) or 0),
+                "exploration_credits": int(r.get("exploration_credits", 0) or 0),
+                "total_credits": int(r.get("total_credits", 0) or 0),
+                "bounty_points": float(r.get("bounty_points", 0.0) or 0.0),
+                "exploration_points": float(r.get("exploration_points", 0.0) or 0.0),
+                "total_points": float(r.get("total_points", 0.0) or 0.0),
+                "bgs_effect": r.get("bgs_effect"),
+                "vouchers": int(r.get("vouchers", 0) or 0),
+                "sales": int(r.get("sales", 0) or 0),
+                "first_ts": r.get("first_ts"),
+                "last_ts": r.get("last_ts"),
+            }
+
+            # cmdr aggregation is stored per system (not per faction)
+            cmdr_blob = systems_cmdr_totals.get(system_name) or {}
+            cmdr_count = None
+            try:
+                cmdr_count = int(cmdr_blob.get("_active_cmdrs", 0) or 0)
+            except Exception:
+                cmdr_count = None
+
+            cmdr_json = None
+            try:
+                # only store the table itself (without helper keys) to keep it smaller
+                cmdr_table = cmdr_blob.get("cmdrs") if isinstance(cmdr_blob.get("cmdrs"), dict) else {}
+                cmdr_json = json.dumps(cmdr_table, ensure_ascii=False) if cmdr_table else None
+            except Exception:
+                cmdr_json = None
+
+            row = (BGSEvalResult.query
+                   .filter_by(ticktime=ticktime, system_name=system_name, faction=faction)
+                   .one_or_none())
+
+            if row:
+                row.total_effect = total_effect
+                row.breakdown_json = json.dumps(breakdown, ensure_ascii=False)
+                row.cmdr_count = cmdr_count
+                row.cmdr_json = cmdr_json
+                row.created_at = created_at
+                updated += 1
+            else:
+                row = BGSEvalResult(
+                    ticktime=ticktime,
+                    system_name=system_name,
+                    faction=faction,
+                    total_effect=total_effect,
+                    breakdown_json=json.dumps(breakdown, ensure_ascii=False),
+                    cmdr_count=cmdr_count,
+                    cmdr_json=cmdr_json,
+                    created_at=created_at
+                )
+                db.session.add(row)
+                inserted += 1
+
+        db.session.commit()
+
+        logger.info(
+            "[EVAL_PERSIST] Done: ticktime='%s' inserted=%d updated=%d skipped=%d",
+            ticktime, inserted, updated, skipped
+        )
+        return True
+
+    except Exception as e:
+        try:
+            db.session.rollback()
+        except Exception:
+            pass
+        logger.exception(f"[EVAL_PERSIST] Failed: {e}")
+        return False
 
 
 # ---------------------------
@@ -133,12 +372,6 @@ def _period_range_utc(period: str) -> Tuple[Optional[str], Optional[str]]:
     return start_iso, end_iso
 
 
-def _safe_bool(v: Optional[str], default: bool = False) -> bool:
-    if v is None:
-        return default
-    return v.strip().lower() in ("1", "true", "yes", "y", "on")
-
-
 # ---------------------------
 # Bucket formulas
 # ---------------------------
@@ -163,17 +396,13 @@ def bounty_points_from_sum(sum_bounty_credits: int, clamp_negative: bool = True)
 def exploration_points_from_sum(sum_exploration_credits: int, clamp_negative: bool = True) -> float:
     """
     Exploration bucket formula (per your new spec):
-        exploration_points = 0.5 * log2( exploration_value / 1,000,000 )
-
-    Note:
-    - sum_exploration_credits is credits (int)
-    - if ratio < 1 -> log2 negative; clamp_negative clamps to 0 (default)
+        exploration_points = 1.0 * log2( exploration_value / 1,000,000 )
     """
     if sum_exploration_credits <= 0:
         return 0.0
 
     ratio = sum_exploration_credits / 1_000_000.0
-    points = 0.5 * (math.log(ratio, 2) if ratio > 0 else float("-inf"))
+    points = 1.0 * (math.log(ratio, 2) if ratio > 0 else float("-inf"))
 
     if clamp_negative and points < 0:
         return 0.0
@@ -991,12 +1220,6 @@ def render_bucket_curves_png(
         y_bounty.append(float(bounty_points_from_sum(credits, clamp_negative=clamp_negative)))
         y_expl.append(float(exploration_points_from_sum(credits, clamp_negative=clamp_negative)))
 
-    # Current markers (totals)
-    cur_b_mcr = current_bounty_credits / 1_000_000.0
-    cur_e_mcr = current_exploration_credits / 1_000_000.0
-    cur_b_pts = bounty_points_from_sum(current_bounty_credits, clamp_negative=clamp_negative)
-    cur_e_pts = exploration_points_from_sum(current_exploration_credits, clamp_negative=clamp_negative)
-
     fig = plt.figure(figsize=(12, 6), dpi=160)
     ax = fig.add_subplot(111)
 
@@ -1062,10 +1285,6 @@ def render_bucket_curves_png(
                 bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="black", alpha=0.8),
             )
 
-    # Total markers (optional)
-    ax.scatter([cur_b_mcr], [cur_b_pts], s=140, color="red", zorder=7, label="Total (Bounties)")
-    ax.scatter([cur_e_mcr], [cur_e_pts], s=140, color="red", zorder=7, label="Total (Exploration)")
-
     # Labels / grid (match screenshot feel)
     ax.set_title(title)
     ax.set_xlabel("Credits (M Cr)")
@@ -1109,12 +1328,15 @@ def register_bucket_v3_routes(app, db, require_api_key):
         clamp_negative = _safe_bool(request.args.get("clamp") or request.form.get("clamp"), default=True)
         x_max_mcr = int(request.args.get("x_max_mcr", request.form.get("x_max_mcr", "100")))
 
-        return period, tickid, ticktime, systemaddress, system, faction, include_cmdr, clamp_negative, x_max_mcr
+        # Phase 2: persistence toggle (default ON)
+        persist_enabled = _safe_bool(request.args.get("persist") or request.form.get("persist"), default=True)
+
+        return period, tickid, ticktime, systemaddress, system, faction, include_cmdr, clamp_negative, x_max_mcr, persist_enabled
 
     @app.route("/api/bgs/v3/bucket", methods=["GET"])
     @require_api_key
     def api_bgs_v3_bucket():
-        period, tickid, ticktime, systemaddress, system, faction, include_cmdr, clamp_negative, _ = _read_common_params()
+        period, tickid, ticktime, systemaddress, system, faction, include_cmdr, clamp_negative, _, _persist = _read_common_params()
 
         rows = evaluate_bucket_all_metrics(
             db=db,
@@ -1149,7 +1371,7 @@ def register_bucket_v3_routes(app, db, require_api_key):
     @require_api_key
     def api_bgs_v3_bucket_discord():
         logger = init_logger()
-        period, tickid, ticktime, systemaddress, system, faction, include_cmdr, clamp_negative, _ = _read_common_params()
+        period, tickid, ticktime, systemaddress, system, faction, include_cmdr, clamp_negative, _, persist_enabled = _read_common_params()
 
         calling_tenant = getattr(g, "tenant", None)
         if not calling_tenant:
@@ -1168,9 +1390,10 @@ def register_bucket_v3_routes(app, db, require_api_key):
             faction=faction,
             include_cmdr=include_cmdr,
             clamp=clamp_negative,
+            persist_enabled=persist_enabled,  # Phase 2 toggle
         )
 
-        return jsonify({"results": results})
+        return jsonify({"results": results, "persist": persist_enabled})
 
     @app.route("/api/bgs/v3/bucket/chart", methods=["GET"])
     @require_api_key
@@ -1264,7 +1487,8 @@ def _send_bucket_to_discord(
     system=None,
     faction=None,
     include_cmdr=True,
-    clamp=True
+    clamp=True,
+    persist_enabled: bool = True
 ):
     """
     Discord sender (combined):
@@ -1272,6 +1496,7 @@ def _send_bucket_to_discord(
     - merges by (systemaddress,faction)
     - sends one message per system
     - attaches combined 2-line chart (bounty + exploration) with Cmdr markers on each line
+    - Phase 2: optionally persist results (ticktime-only)
     """
     logger = init_logger()
 
@@ -1440,6 +1665,58 @@ def _send_bucket_to_discord(
         except Exception:
             return "n/a"
 
+    # -------------------------------------------------------------------------
+    # Phase 2: Persist evaluation results (ticktime-only) BEFORE sending discord
+    # -------------------------------------------------------------------------
+    # Persist only for the normal API call path (tenant passed) – and only if enabled.
+    systems_cmdr_totals: Dict[str, Dict[str, Any]] = {}
+    if include_cmdr:
+        # Build per-system cmdr totals once (used both for persistence + discord tables)
+        for system_name, rows in systems.items():
+            cmdr_totals: Dict[str, Dict[str, Any]] = {}
+            for r in rows:
+                cmdrs = r.get("cmdrs") if isinstance(r.get("cmdrs"), dict) else {}
+                for cmdr_name, d in cmdrs.items():
+                    ct = cmdr_totals.setdefault(cmdr_name, {
+                        "bounty_credits": 0, "bounty_points": 0.0,
+                        "exploration_credits": 0, "exploration_points": 0.0,
+                        "total_credits": 0, "total_points": 0.0,
+                    })
+                    ct["bounty_credits"] += int(d.get("bounty_credits", 0) or 0)
+                    ct["bounty_points"] += float(d.get("bounty_points", 0.0) or 0.0)
+                    ct["exploration_credits"] += int(d.get("exploration_credits", 0) or 0)
+                    ct["exploration_points"] += float(d.get("exploration_points", 0.0) or 0.0)
+
+            for _, d in cmdr_totals.items():
+                d["total_credits"] = int(d.get("bounty_credits", 0) or 0) + int(d.get("exploration_credits", 0) or 0)
+                d["total_points"] = float(d.get("bounty_points", 0.0) or 0.0) + float(d.get("exploration_points", 0.0) or 0.0)
+
+            systems_cmdr_totals[system_name] = {
+                "_active_cmdrs": int(len(cmdr_totals)),
+                "cmdrs": cmdr_totals
+            }
+
+    if persist_enabled:
+        ticktime_persist = _resolve_ticktime_for_persist(ticktime, logger)
+        if ticktime_persist:
+            logger.info("[EVAL_PERSIST] Persistence enabled with ticktime: %s; persisting results...", ticktime_persist)
+            _persist_bgs_eval_results_ticktime_only(
+                db=db,
+                ticktime=ticktime_persist,
+                eval_type="bgs_v3_4bucket",
+                version="3.0",
+                merged_rows=merged_rows,
+                systems_cmdr_totals=systems_cmdr_totals,
+                logger=logger
+            )
+        else:
+            logger.warning("[EVAL_PERSIST] persist_enabled=True but ticktime missing -> skipped.")
+    else:
+        logger.info("[EVAL_PERSIST] Persistence disabled via parameter persist=0/false/off; skip.")
+
+    # -------------------------------------------------------------------------
+    # Discord output
+    # -------------------------------------------------------------------------
     for t in tenants:
         webhook_url = get_discord_webhook(t, "bullis")
         if not webhook_url:
@@ -1451,45 +1728,64 @@ def _send_bucket_to_discord(
         tick_label = ticktime or tickid or period_label
 
         # --- SEND HEADER MESSAGE FIRST (per tenant) ---
-        try:
-            header_msg = (
-                "## BGS v3 - 'The 4 Bucket' Evaluation\n"
-                "This evaluation applies the **BGS Bucket Model** by aggregating bounty credits per system and faction first and then converting the total into influence points using a logarithmic function, reflecting diminishing returns and soft caps. The approach follows the **four-bucket concept (combat, trade, exploration, missions)** described in *The BGS Guide* (see *\"The Bucket Model\"*, page 36 ff.), where balanced activity across multiple buckets is more effective than focusing on a single one (<https://sinc.science/bgsguide.pdf>).\n\n"
-                "Note: This is **Phase 1** focusing on the **Combat/Bounty Bucket** using RedeemVoucherEvents of type 'bounty'.\n\n"
-                f"Tenant: **{t.get('name')}**\n"
-                f"Period/Tick: **{tick_label}**\n"
+        has_systems_to_send = False
+        for _sysname, _rows in systems.items():
+            _rows_sorted = sorted(
+                _rows,
+                key=lambda r: (float(r.get("total_points", 0.0) or 0.0), int(r.get("total_credits", 0) or 0)),
+                reverse=True,
             )
+            if faction:
+                _rows_sorted = [r for r in _rows_sorted if (r.get("faction") or "") == faction] or _rows_sorted
+            if _rows_sorted:
+                has_systems_to_send = True
+                break
 
-            resp_hdr = requests.post(
-                webhook_url,
-                json={"content": header_msg, "allowed_mentions": {"parse": []}},
-                timeout=20,
-            )
-            if resp_hdr.status_code not in (200, 204):
-                logger.error(f"Discord webhook header error ({resp_hdr.status_code}): {resp_hdr.text}")
-                results.append({"tenant": t.get("name"), "system": None, "status": "header_discord_error", "code": resp_hdr.status_code})
-            else:
-                results.append({"tenant": t.get("name"), "system": None, "status": "header_sent"})
-        except Exception as e:
-            logger.exception(f"Discord header send failed for tenant={t.get('name')}")
-            results.append({"tenant": t.get("name"), "system": None, "status": "header_exception", "error": str(e)})
+        if not has_systems_to_send:
+            logger.info(f"Skipping Discord header for tenant {t.get('name')} - no systems to send.")
+        else:
+            try:
+                header_msg = (
+                    "## BGS v3 - 'The 4 Bucket' Evaluation\n"
+                    "This evaluation applies the **BGS Bucket Model** by aggregating bounty credits per system and faction first and then converting the total into influence points using a logarithmic function, reflecting diminishing returns and soft caps. The approach follows the **four-bucket concept (combat, trade, exploration, missions)** described in *The BGS Guide* (see *\"The Bucket Model\"*, page 36 ff.), where balanced activity across multiple buckets is more effective than focusing on a single one (<https://sinc.science/bgsguide.pdf>).\n\n"
+                    "Note: This is **Phase 2** focusing on the **Bounty Bucket** and **Exploration Bucket** and it is Alpha Version.\n\n"
+                    f"Tenant: **{t.get('name')}**\n"
+                    f"Period/Tick: **{tick_label}**\n"
+                    f"Persisted: **{'yes' if persist_enabled else 'no'}**\n"
+                )
+
+                resp_hdr = requests.post(
+                    webhook_url,
+                    json={"content": header_msg, "allowed_mentions": {"parse": []}},
+                    timeout=20,
+                )
+                if resp_hdr.status_code not in (200, 204):
+                    logger.error(f"Discord webhook header error ({resp_hdr.status_code}): {resp_hdr.text}")
+                    results.append({"tenant": t.get("name"), "system": None, "status": "header_discord_error", "code": resp_hdr.status_code})
+                else:
+                    results.append({"tenant": t.get("name"), "system": None, "status": "header_sent"})
+                    try:
+                        logger.info(f"Discord header sent for tenant={t.get('name')} tick={tick_label}")
+                    except Exception:
+                        pass
+
+            except Exception as e:
+                logger.exception(f"Discord header send failed for tenant={t.get('name')}")
+                results.append({"tenant": t.get("name"), "system": None, "status": "header_exception", "error": str(e)})
 
         for system_name, rows in systems.items():
-            # within system, keep rows sorted by combined points
             rows_sorted = sorted(
                 rows,
                 key=lambda r: (float(r.get("total_points", 0.0) or 0.0), int(r.get("total_credits", 0) or 0)),
                 reverse=True,
             )
 
-            # if caller filtered faction, keep that faction if present
             if faction:
                 rows_sorted = [r for r in rows_sorted if (r.get("faction") or "") == faction] or rows_sorted
 
             if not rows_sorted:
                 continue
 
-            # System totals across included factions
             sys_total_points = sum(float(r.get("total_points", 0.0) or 0.0) for r in rows_sorted)
             sys_total_credits = sum(int(r.get("total_credits", 0) or 0) for r in rows_sorted)
             sys_bounty_points = sum(float(r.get("bounty_points", 0.0) or 0.0) for r in rows_sorted)
@@ -1507,56 +1803,30 @@ def _send_bucket_to_discord(
             except Exception:
                 sys_effect_total = None
 
-            # Cmdr totals across factions (combined) + per-metric dicts for chart markers
-            cmdr_totals: Dict[str, Dict[str, Any]] = {}
+            cmdr_blob = systems_cmdr_totals.get(system_name) or {}
+            cmdr_totals = cmdr_blob.get("cmdrs") if isinstance(cmdr_blob.get("cmdrs"), dict) else {}
+            active_cmdrs = int(cmdr_blob.get("_active_cmdrs", 0) or 0)
+
+            # per-metric dicts for chart markers
             bounty_cmdr_points: Dict[str, Dict[str, Any]] = {}
             exploration_cmdr_points: Dict[str, Dict[str, Any]] = {}
 
             if include_cmdr:
-                for r in rows_sorted:
-                    cmdrs = r.get("cmdrs") if isinstance(r.get("cmdrs"), dict) else {}
-                    for cmdr_name, d in cmdrs.items():
-                        ct = cmdr_totals.setdefault(cmdr_name, {
-                            "bounty_credits": 0, "bounty_points": 0.0,
-                            "exploration_credits": 0, "exploration_points": 0.0,
-                            "total_credits": 0, "total_points": 0.0,
-                        })
-                        ct["bounty_credits"] += int(d.get("bounty_credits", 0) or 0)
-                        ct["bounty_points"] += float(d.get("bounty_points", 0.0) or 0.0)
-                        ct["exploration_credits"] += int(d.get("exploration_credits", 0) or 0)
-                        ct["exploration_points"] += float(d.get("exploration_points", 0.0) or 0.0)
-
                 for name, d in cmdr_totals.items():
-                    d["total_credits"] = int(d.get("bounty_credits", 0) or 0) + int(d.get("exploration_credits", 0) or 0)
-                    d["total_points"] = float(d.get("bounty_points", 0.0) or 0.0) + float(d.get("exploration_points", 0.0) or 0.0)
-
-                    # per-metric point dicts for chart markers (MUST be {credits, points})
                     if int(d.get("bounty_credits", 0) or 0) > 0:
-                        bounty_cmdr_points[name] = {
-                            "credits": int(d.get("bounty_credits", 0) or 0),
-                            "points": float(d.get("bounty_points", 0.0) or 0.0),
-                        }
+                        bounty_cmdr_points[name] = {"credits": int(d.get("bounty_credits", 0) or 0), "points": float(d.get("bounty_points", 0.0) or 0.0)}
                     if int(d.get("exploration_credits", 0) or 0) > 0:
-                        exploration_cmdr_points[name] = {
-                            "credits": int(d.get("exploration_credits", 0) or 0),
-                            "points": float(d.get("exploration_points", 0.0) or 0.0),
-                        }
-
-            active_cmdrs = len(cmdr_totals)
+                        exploration_cmdr_points[name] = {"credits": int(d.get("exploration_credits", 0) or 0), "points": float(d.get("exploration_points", 0.0) or 0.0)}
 
             # ---------------------------
             # Build discord content (combined tables)
             # ---------------------------
             lines: List[str] = []
-            lines.append(f"## 📊 BGS Bucket Eval — {system_name}")
-            #lines.append(f"Tenant: **{t.get('name')}**")
-            #lines.append(f"Period/Tick: **{tick_label}**")
-            #lines.append("Curves: **Bounties (black) + Exploration (orange)**")
+            lines.append(f"## 📊 {system_name}")
             if faction:
                 lines.append(f"Faction filter: **{faction}**")
             lines.append("")
 
-            # B) System Overview
             lines.append("**:star: System Overview**")
             lines.append("```text")
             lines.append(f"{'Population':<16} | {pop_txt:>15}")
@@ -1574,7 +1844,6 @@ def _send_bucket_to_discord(
             lines.append("Refer to <https://sinc.science/bgsguide.pdf> page 39/40 for details.")
             lines.append("")
 
-            # A) Cmdr Contributions (combined + per-metric)
             lines.append("**:astronaut: Cmdr Contributions**")
             lines.append("```text")
             lines.append(f"{'Cmdr':<18} | {'B MCr':>8} | {'B Pt':>7} | {'E MCr':>8} | {'E Pt':>7} | {'T Pt':>7}")
@@ -1602,7 +1871,6 @@ def _send_bucket_to_discord(
             lines.append("```")
             lines.append("")
 
-            # C) Faction Breakdown within system
             lines.append("**:classical_building: Faction Breakdown (within system)**")
             lines.append("```text")
             lines.append(f"{'Faction':<22} | {'B Pt':>7} | {'E Pt':>7} | {'T Pt':>7} | {'Share':>6}")
@@ -1620,7 +1888,6 @@ def _send_bucket_to_discord(
                 lines.append(f"... ({len(rows_sorted) - 25} more factions omitted)")
             lines.append("```")
             lines.append("")
-            #lines.append("_📎 Chart attached below: curves + Cmdr markers on each curve._")
 
             content = "\n".join(lines)
 
@@ -1682,6 +1949,10 @@ def _send_bucket_to_discord(
                         "status": "sent",
                         "chart_attached": bool(file_payload)
                     })
+                    try:
+                        logger.info(f"Discord message sent tenant={t.get('name')} system={system_name} chart_attached={bool(file_payload)}")
+                    except Exception:
+                        pass
 
             except Exception as e:
                 logger.exception(f"Discord send failed tenant={t.get('name')} system={system_name}")
@@ -1693,4 +1964,3 @@ def _send_bucket_to_discord(
                 })
 
     return results
-

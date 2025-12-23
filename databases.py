@@ -1,40 +1,70 @@
 import os
-from models import db, System, Faction, MissionCompletedEvent, MarketBuyEvent, MarketSellEvent, RedeemVoucherEvent, MultiSellExplorationDataEvent, SellExplorationDataEvent
-from sqlalchemy.engine import make_url
-from sqlalchemy import create_engine, inspect, text, Column, Integer, String, Boolean, MetaData, Table
-import sqlalchemy
 import logging
+import logging.handlers
 import json
 
-# Lade Tenant-Konfiguration
+import sqlalchemy
+from sqlalchemy import create_engine, inspect, text, Column, Integer, String, Boolean, MetaData, Table
+from sqlalchemy.engine import make_url
+
+from models import (
+    db,
+    System, Faction,
+    MissionCompletedEvent,
+    MarketBuyEvent, MarketSellEvent,
+    RedeemVoucherEvent,
+    MultiSellExplorationDataEvent, SellExplorationDataEvent,
+    BGSEvalRun, BGSEvalResult
+)
+
+# -----------------------------------------------------------------------------
+# Tenant-Konfiguration
+# -----------------------------------------------------------------------------
 TENANT_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "tenant.json")
 with open(TENANT_CONFIG_PATH, "r", encoding="utf-8") as f:
     TENANTS = json.load(f)
 
-# Log-Verzeichnis sicherstellen
+# -----------------------------------------------------------------------------
+# Logging
+# -----------------------------------------------------------------------------
 LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
-# Logger mit RotatingFileHandler, max. 128 MB, 10 Backups
 logger = logging.getLogger("databases")
 log_handler = logging.handlers.RotatingFileHandler(
-    os.path.join(LOG_DIR, "databases.log"), maxBytes=128 * 1024 * 1024, backupCount=10
+    os.path.join(LOG_DIR, "databases.log"), maxBytes=4 * 1024 * 1024, backupCount=10
 )
 formatter = logging.Formatter('%(asctime)s %(levelname)s:%(name)s:%(message)s')
 log_handler.setFormatter(formatter)
 logger.addHandler(log_handler)
 logger.setLevel(logging.INFO)
-logger.propagate = False  # verhindert Weitergabe an Root-Logger
+logger.propagate = False
 
 
-# Sicherstellen, dass die Tabelle protected_faction existiert
-def ensure_protected_faction_table(db_uri):
-    url = make_url(db_uri)
-    engine = create_engine(db_uri)
-    metadata = MetaData()
-    inspector = inspect(engine)
-    if "protected_faction" not in inspector.get_table_names():
-        protected_faction = Table(
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
+def _get_existing_columns(engine, table_name: str) -> set[str]:
+    insp = inspect(engine)
+    return set([col['name'] for col in insp.get_columns(table_name)])
+
+
+def _get_model_columns(model) -> dict:
+    return {col.name: col for col in model.__table__.columns}
+
+
+def ensure_protected_faction_table_conn(conn, db_uri: str):
+    """
+    Legt 'protected_faction' an, falls sie fehlt.
+    """
+    try:
+        insp = inspect(conn)
+        if "protected_faction" in insp.get_table_names():
+            logger.info(f"Tabelle 'protected_faction' existiert bereits in {db_uri}.")
+            return
+
+        metadata = MetaData()
+        Table(
             "protected_faction", metadata,
             Column("id", Integer, primary_key=True),
             Column("name", String(128), unique=True, nullable=False),
@@ -42,23 +72,63 @@ def ensure_protected_faction_table(db_uri):
             Column("description", String(128)),
             Column("protected", Boolean, default=True)
         )
-        metadata.create_all(engine, tables=[protected_faction])
-        logger.info(f"Tabelle 'protected_faction' wurde in {db_uri} angelegt.")
-    else:
-        logger.info(f"Tabelle 'protected_faction' existiert bereits in {db_uri}.")
+        metadata.create_all(conn)
+        logger.info(f"Tabelle 'protected_faction' sichergestellt für Tenant: {db_uri}")
+    except Exception as e:
+        logger.warning(f"ensure_protected_faction_table_conn failed for {db_uri}: {e}")
 
 
-# Initialisierung der Tenant-Datenbanken
+def ensure_bgs_eval_tables_and_indexes(conn, db_uri: str):
+    """
+    Phase 2: Ensure eval tables exist and indexes/unique constraints are present.
+
+    Important:
+      - db.Model.metadata.create_all(bind=conn) creates missing tables,
+        but indexes on existing DBs are not always applied retroactively.
+      - Therefore we enforce indexes via CREATE INDEX IF NOT EXISTS.
+    """
+    try:
+        # Tables (safe repeated)
+        db.Model.metadata.create_all(bind=conn)
+
+        # EvalRun index
+        conn.execute(sqlalchemy.text(
+            "CREATE INDEX IF NOT EXISTS idx_bgs_eval_run_ticktime ON bgs_eval_run(ticktime);"
+        ))
+
+        # EvalResult unique + indexes
+        conn.execute(sqlalchemy.text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_bgs_eval_result "
+            "ON bgs_eval_result(ticktime, system_name, faction);"
+        ))
+        conn.execute(sqlalchemy.text(
+            "CREATE INDEX IF NOT EXISTS idx_bgs_eval_result_ticktime ON bgs_eval_result(ticktime);"
+        ))
+        conn.execute(sqlalchemy.text(
+            "CREATE INDEX IF NOT EXISTS idx_bgs_eval_result_system ON bgs_eval_result(system_name);"
+        ))
+        conn.execute(sqlalchemy.text(
+            "CREATE INDEX IF NOT EXISTS idx_bgs_eval_result_faction ON bgs_eval_result(faction);"
+        ))
+
+        logger.info(f"Tabellen/Indizes 'bgs_eval_*' sichergestellt für Tenant: {db_uri}")
+    except Exception as e:
+        logger.warning(f"ensure_bgs_eval_tables_and_indexes failed for {db_uri}: {e}")
+
+
+# -----------------------------------------------------------------------------
+# Initialisierung (nur DB-Datei + minimal create_all für neue SQLite DBs)
+# -----------------------------------------------------------------------------
 def initialize_all_tenant_databases():
     """
-    Prüft beim Start für alle Tenants, ob die SQLite-DB-Datei existiert.
-    Falls nicht, wird sie samt Tabellenstruktur angelegt.
-    Zusätzlich wird die Tabelle protected_faction angelegt, falls sie fehlt.
+    Stellt beim Start sicher, dass die SQLite-DB-Dateien existieren.
+    Keine Schema-Updates hier – dafür ist update_all_tenant_databases() zuständig.
     """
     for tenant in TENANTS:
         db_uri = tenant.get("db_uri")
         if not db_uri:
             continue
+
         url = make_url(db_uri)
         if url.drivername == "sqlite" and url.database not in (None, "", ":memory:"):
             sqlite_file_path = url.database
@@ -66,42 +136,48 @@ def initialize_all_tenant_databases():
             dir_name = os.path.dirname(abs_path)
             if dir_name and not os.path.exists(dir_name):
                 os.makedirs(dir_name, exist_ok=True)
+
             if not os.path.exists(abs_path):
                 engine = create_engine(db_uri, connect_args={"check_same_thread": False})
                 with engine.begin() as conn:
                     db.Model.metadata.create_all(bind=conn)
-                logger.info(f"Tenant-DB initialisiert: {abs_path}")
-        # Update existing Tenant DB
-        ensure_protected_faction_table(db_uri)
+                logger.info(f"Tenant-DB initialisiert (neu): {abs_path}")
 
 
-# Aktualisierung der Tenant-Datenbanken
+# -----------------------------------------------------------------------------
+# Updates / "Migrationen" (Single place for schema ensures + column adds)
+# -----------------------------------------------------------------------------
 def update_all_tenant_databases():
     """
     Aktualisiert für alle Tenants die Tabellenstruktur und Felder gemäß models.py.
-    Fügt neue Felder/Tabellen hinzu, falls sie fehlen.
-    Ergänzt fehlende Spalten in bestehenden Tabellen (nur für SQLite).
+    - Erst ensure/create missing tables via create_all
+    - Danach ENSURE: protected_faction + bgs_eval tables/indexes
+    - Danach SQLite-spezifische ALTER TABLE ADD COLUMN für bestehende Tabellen/Spalten
     """
-    def get_existing_columns(engine, table_name):
-        insp = inspect(engine)
-        return set([col['name'] for col in insp.get_columns(table_name)])
-
-    def get_model_columns(model):
-        return {col.name: col for col in model.__table__.columns}
-
     for tenant in TENANTS:
         db_uri = tenant.get("db_uri")
         if not db_uri:
             continue
+
         url = make_url(db_uri)
         connect_args = {"check_same_thread": False} if url.drivername == "sqlite" else {}
         engine = create_engine(db_uri, connect_args=connect_args)
+
         with engine.begin() as conn:
+            # 1) Missing tables
             db.Model.metadata.create_all(bind=conn)
+
+            # 2) Ensure protected factions
+            ensure_protected_faction_table_conn(conn, db_uri)
+
+            # 3) Ensure bgs eval tables + indexes (ticktime-only)
+            ensure_bgs_eval_tables_and_indexes(conn, db_uri)
+
+            # 4) SQLite: missing columns via ALTER TABLE
             if url.drivername == "sqlite":
-                # --- Tabelle system ---
-                sys_existing = get_existing_columns(engine, "system")
-                sys_model = get_model_columns(System)
+                # --- system ---
+                sys_existing = _get_existing_columns(engine, "system")
+                sys_model = _get_model_columns(System)
                 for col_name, col_obj in sys_model.items():
                     if col_name not in sys_existing:
                         col_type = str(col_obj.type)
@@ -112,9 +188,9 @@ def update_all_tenant_databases():
                         except Exception as e:
                             logger.warning(f"Fehler beim Ergänzen von Spalte '{col_name}' in 'system': {e}")
 
-                # --- Tabelle faction ---
-                fac_existing = get_existing_columns(engine, "faction")
-                fac_model = get_model_columns(Faction)
+                # --- faction ---
+                fac_existing = _get_existing_columns(engine, "faction")
+                fac_model = _get_model_columns(Faction)
                 for col_name, col_obj in fac_model.items():
                     if col_name not in fac_existing:
                         col_type = str(col_obj.type)
@@ -125,112 +201,147 @@ def update_all_tenant_databases():
                         except Exception as e:
                             logger.warning(f"Fehler beim Ergänzen von Spalte '{col_name}' in 'faction': {e}")
 
-                # --- Tabelle mission_completed_event ---
-                mce_existing = get_existing_columns(engine, "mission_completed_event")
-                mce_model = get_model_columns(MissionCompletedEvent)
-                for col_name, col_obj in mce_model.items():
-                    if col_name not in mce_existing:
-                        col_type = str(col_obj.type)
-                        alter_sql = f'ALTER TABLE mission_completed_event ADD COLUMN {col_name} {col_type}'
-                        try:
-                            conn.execute(sqlalchemy.text(alter_sql))
-                            logger.info(
-                                f"Spalte '{col_name}' zu Tabelle 'mission_completed_event' ergänzt für Tenant: {db_uri}")
-                        except Exception as e:
-                            logger.warning(
-                                f"Fehler beim Ergänzen von Spalte '{col_name}' in 'mission_completed_event': {e}"
-                            )
+                # --- mission_completed_event ---
+                try:
+                    mce_existing = _get_existing_columns(engine, "mission_completed_event")
+                    mce_model = _get_model_columns(MissionCompletedEvent)
+                    for col_name, col_obj in mce_model.items():
+                        if col_name not in mce_existing:
+                            col_type = str(col_obj.type)
+                            alter_sql = f'ALTER TABLE mission_completed_event ADD COLUMN {col_name} {col_type}'
+                            try:
+                                conn.execute(sqlalchemy.text(alter_sql))
+                                logger.info(
+                                    f"Spalte '{col_name}' zu Tabelle 'mission_completed_event' ergänzt für Tenant: {db_uri}"
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    f"Fehler beim Ergänzen von Spalte '{col_name}' in 'mission_completed_event': {e}"
+                                )
+                except Exception as e:
+                    logger.warning(f"mission_completed_event column ensure skipped for {db_uri}: {e}")
 
-                # --- Tabelle market_buy_event ---
-                mb_existing = get_existing_columns(engine, "market_buy_event")
-                mb_model = get_model_columns(MarketBuyEvent)
-                for col_name, col_obj in mb_model.items():
-                    if col_name not in mb_existing:
-                        col_type = str(col_obj.type)
-                        alter_sql = f'ALTER TABLE market_buy_event ADD COLUMN {col_name} {col_type}'
-                        try:
-                            conn.execute(sqlalchemy.text(alter_sql))
-                            logger.info(f"Spalte '{col_name}' zu Tabelle 'market_buy_event' ergänzt für Tenant: {db_uri}")
-                        except Exception as e:
-                            logger.warning(f"Fehler beim Ergänzen von Spalte '{col_name}' in 'market_buy_event': {e}")
+                # --- market_buy_event ---
+                try:
+                    mb_existing = _get_existing_columns(engine, "market_buy_event")
+                    mb_model = _get_model_columns(MarketBuyEvent)
+                    for col_name, col_obj in mb_model.items():
+                        if col_name not in mb_existing:
+                            col_type = str(col_obj.type)
+                            alter_sql = f'ALTER TABLE market_buy_event ADD COLUMN {col_name} {col_type}'
+                            try:
+                                conn.execute(sqlalchemy.text(alter_sql))
+                                logger.info(f"Spalte '{col_name}' zu Tabelle 'market_buy_event' ergänzt für Tenant: {db_uri}")
+                            except Exception as e:
+                                logger.warning(f"Fehler beim Ergänzen von Spalte '{col_name}' in 'market_buy_event': {e}")
+                except Exception as e:
+                    logger.warning(f"market_buy_event column ensure skipped for {db_uri}: {e}")
 
-                # --- Tabelle market_sell_event ---
-                ms_existing = get_existing_columns(engine, "market_sell_event")
-                ms_model = get_model_columns(MarketSellEvent)
-                for col_name, col_obj in ms_model.items():
-                    if col_name not in ms_existing:
-                        col_type = str(col_obj.type)
-                        alter_sql = f'ALTER TABLE market_sell_event ADD COLUMN {col_name} {col_type}'
-                        try:
-                            conn.execute(sqlalchemy.text(alter_sql))
-                            logger.info(f"Spalte '{col_name}' zu Tabelle 'market_sell_event' ergänzt für Tenant: {db_uri}")
-                        except Exception as e:
-                            logger.warning(f"Fehler beim Ergänzen von Spalte '{col_name}' in 'market_sell_event': {e}")
+                # --- market_sell_event ---
+                try:
+                    ms_existing = _get_existing_columns(engine, "market_sell_event")
+                    ms_model = _get_model_columns(MarketSellEvent)
+                    for col_name, col_obj in ms_model.items():
+                        if col_name not in ms_existing:
+                            col_type = str(col_obj.type)
+                            alter_sql = f'ALTER TABLE market_sell_event ADD COLUMN {col_name} {col_type}'
+                            try:
+                                conn.execute(sqlalchemy.text(alter_sql))
+                                logger.info(f"Spalte '{col_name}' zu Tabelle 'market_sell_event' ergänzt für Tenant: {db_uri}")
+                            except Exception as e:
+                                logger.warning(f"Fehler beim Ergänzen von Spalte '{col_name}' in 'market_sell_event': {e}")
+                except Exception as e:
+                    logger.warning(f"market_sell_event column ensure skipped for {db_uri}: {e}")
 
-                # --- Tabelle redeem_voucher_event ---
-                rv_existing = get_existing_columns(engine, "redeem_voucher_event")
-                rv_model = get_model_columns(RedeemVoucherEvent)
-                for col_name, col_obj in rv_model.items():
-                    if col_name not in rv_existing:
-                        col_type = str(col_obj.type)
-                        alter_sql = f'ALTER TABLE redeem_voucher_event ADD COLUMN {col_name} {col_type}'
-                        try:
-                            conn.execute(sqlalchemy.text(alter_sql))
-                            logger.info(f"Spalte '{col_name}' zu Tabelle 'redeem_voucher_event' ergänzt für Tenant: {db_uri}")
-                        except Exception as e:
-                            logger.warning(f"Fehler beim Ergänzen von Spalte '{col_name}' in 'redeem_voucher_event': {e}")
+                # --- redeem_voucher_event ---
+                try:
+                    rv_existing = _get_existing_columns(engine, "redeem_voucher_event")
+                    rv_model = _get_model_columns(RedeemVoucherEvent)
+                    for col_name, col_obj in rv_model.items():
+                        if col_name not in rv_existing:
+                            col_type = str(col_obj.type)
+                            alter_sql = f'ALTER TABLE redeem_voucher_event ADD COLUMN {col_name} {col_type}'
+                            try:
+                                conn.execute(sqlalchemy.text(alter_sql))
+                                logger.info(f"Spalte '{col_name}' zu Tabelle 'redeem_voucher_event' ergänzt für Tenant: {db_uri}")
+                            except Exception as e:
+                                logger.warning(f"Fehler beim Ergänzen von Spalte '{col_name}' in 'redeem_voucher_event': {e}")
+                except Exception as e:
+                    logger.warning(f"redeem_voucher_event column ensure skipped for {db_uri}: {e}")
 
-                # --- Tabelle multi_sell_exploration_data_event ---
-                msed_existing = get_existing_columns(engine, "multi_sell_exploration_data_event")
-                msed_model = get_model_columns(MultiSellExplorationDataEvent)
-                for col_name, col_obj in msed_model.items():
-                    if col_name not in msed_existing:
-                        col_type = str(col_obj.type)
-                        alter_sql = f'ALTER TABLE multi_sell_exploration_data_event ADD COLUMN {col_name} {col_type}'
-                        try:
-                            conn.execute(sqlalchemy.text(alter_sql))
-                            logger.info(f"Spalte '{col_name}' zu Tabelle 'multi_sell_exploration_data_event' ergänzt für Tenant: {db_uri}")
-                        except Exception as e:
-                            logger.warning(f"Fehler beim Ergänzen von Spalte '{col_name}' in 'multi_sell_exploration_data_event': {e}")
+                # --- multi_sell_exploration_data_event ---
+                try:
+                    msed_existing = _get_existing_columns(engine, "multi_sell_exploration_data_event")
+                    msed_model = _get_model_columns(MultiSellExplorationDataEvent)
+                    for col_name, col_obj in msed_model.items():
+                        if col_name not in msed_existing:
+                            col_type = str(col_obj.type)
+                            alter_sql = f'ALTER TABLE multi_sell_exploration_data_event ADD COLUMN {col_name} {col_type}'
+                            try:
+                                conn.execute(sqlalchemy.text(alter_sql))
+                                logger.info(
+                                    f"Spalte '{col_name}' zu Tabelle 'multi_sell_exploration_data_event' ergänzt für Tenant: {db_uri}"
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    f"Fehler beim Ergänzen von Spalte '{col_name}' in 'multi_sell_exploration_data_event': {e}"
+                                )
+                except Exception as e:
+                    logger.warning(f"multi_sell_exploration_data_event column ensure skipped for {db_uri}: {e}")
 
-                # --- Tabelle sell_exploration_data_event ---
-                sed_existing = get_existing_columns(engine, "sell_exploration_data_event")
-                sed_model = get_model_columns(SellExplorationDataEvent)
-                for col_name, col_obj in sed_model.items():
-                    if col_name not in sed_existing:
-                        col_type = str(col_obj.type)
-                        alter_sql = f'ALTER TABLE sell_exploration_data_event ADD COLUMN {col_name} {col_type}'
-                        try:
-                            conn.execute(sqlalchemy.text(alter_sql))
-                            logger.info(f"Spalte '{col_name}' zu Tabelle 'sell_exploration_data_event' ergänzt für Tenant: {db_uri}")
-                        except Exception as e:
-                            logger.warning(f"Fehler beim Ergänzen von Spalte '{col_name}' in 'sell_exploration_data_event': {e}")
+                # --- sell_exploration_data_event ---
+                try:
+                    sed_existing = _get_existing_columns(engine, "sell_exploration_data_event")
+                    sed_model = _get_model_columns(SellExplorationDataEvent)
+                    for col_name, col_obj in sed_model.items():
+                        if col_name not in sed_existing:
+                            col_type = str(col_obj.type)
+                            alter_sql = f'ALTER TABLE sell_exploration_data_event ADD COLUMN {col_name} {col_type}'
+                            try:
+                                conn.execute(sqlalchemy.text(alter_sql))
+                                logger.info(
+                                    f"Spalte '{col_name}' zu Tabelle 'sell_exploration_data_event' ergänzt für Tenant: {db_uri}"
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    f"Fehler beim Ergänzen von Spalte '{col_name}' in 'sell_exploration_data_event': {e}"
+                                )
+                except Exception as e:
+                    logger.warning(f"sell_exploration_data_event column ensure skipped for {db_uri}: {e}")
 
         logger.info(f"Tenant-DB aktualisiert: {db_uri}")
 
 
-# Löschen aller Aktivitätsdaten für alle Tenants
+# -----------------------------------------------------------------------------
+# Utility: Activity-Daten löschen
+# -----------------------------------------------------------------------------
 def delete_all_activity_data():
     """
     Löscht alle Datensätze aus den Tabellen activity, system und faction für alle Tenants.
     """
-    from models import Activity, System, Faction
+    from sqlalchemy.orm import sessionmaker
+    from models import Activity, System as SysModel, Faction as FacModel
+
     for tenant in TENANTS:
         db_uri = tenant.get("db_uri")
         if not db_uri:
             continue
+
         url = make_url(db_uri)
         connect_args = {"check_same_thread": False} if url.drivername == "sqlite" else {}
         engine = create_engine(db_uri, connect_args=connect_args)
-        from sqlalchemy.orm import sessionmaker
+
         Session = sessionmaker(bind=engine)
         session = Session()
         try:
-            deleted_faction = session.query(Faction).delete()
-            deleted_system = session.query(System).delete()
+            deleted_faction = session.query(FacModel).delete()
+            deleted_system = session.query(SysModel).delete()
             deleted_activity = session.query(Activity).delete()
             session.commit()
-            logger.info(f"Alle Datensätze aus activity, system und faction für Tenant {db_uri} gelöscht.")
+            logger.info(
+                f"Alle Datensätze aus activity/system/faction für Tenant {db_uri} gelöscht "
+                f"(activity={deleted_activity}, system={deleted_system}, faction={deleted_faction})."
+            )
         except Exception as e:
             session.rollback()
             logger.error(f"Fehler beim Löschen der Daten für Tenant {db_uri}: {e}")
@@ -238,18 +349,22 @@ def delete_all_activity_data():
             session.close()
 
 
-# Sicherstellen sinnvoller Indizes in der EDDN-Datenbank
+# -----------------------------------------------------------------------------
+# Optional: Ensure EDDN Indizes
+# -----------------------------------------------------------------------------
 def ensure_eddn_indexes():
-    """Erzeugt sinnvolle Indizes im EDDN-DB-Kontext, falls nicht vorhanden."""
+    """
+    Erzeugt sinnvolle Indizes im EDDN-DB-Kontext, falls nicht vorhanden.
+    """
     try:
         eddn_db_uri = os.getenv("EDDN_DATABASE")
         if not eddn_db_uri:
             logger.warning("EDDN_DATABASE not configured; skip index creation")
             return
+
         engine = create_engine(eddn_db_uri)
         with engine.connect() as conn:
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_esi_system_name ON eddn_system_info(system_name);"))
-            # Ggf. weitere Indizes hier ergänzen
             logger.info("EDDN indexes ensured (idx_esi_system_name).")
     except Exception as e:
         logger.error(f"ensure_eddn_indexes failed: {e}")

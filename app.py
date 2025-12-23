@@ -44,7 +44,7 @@ logfile_path = os.path.join(LOG_DIR, "app.log")
 logging.basicConfig(
     level=logging.INFO,
     handlers=[
-        logging.handlers.RotatingFileHandler(logfile_path, maxBytes=128 * 1024 * 1024, backupCount=10),
+        logging.handlers.RotatingFileHandler(logfile_path, maxBytes=4 * 1024 * 1024, backupCount=10),
         logging.StreamHandler()
     ],
     format='%(asctime)s %(levelname)s:%(name)s:%(message)s'

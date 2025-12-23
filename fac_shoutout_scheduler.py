@@ -22,7 +22,7 @@ def init_logger():
     print(f"Log Path: {log_path.resolve()}")
     logger = logging.getLogger("fac_shoutout_scheduler")
     logger.setLevel(logging.INFO)
-    log_handler = RotatingFileHandler(log_path, maxBytes=128 * 1024 * 1024, backupCount=3)
+    log_handler = RotatingFileHandler(log_path, maxBytes=4 * 1024 * 1024, backupCount=10)
     stream_handler = logging.StreamHandler()
     formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
     log_handler.setFormatter(formatter)

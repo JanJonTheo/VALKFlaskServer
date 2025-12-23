@@ -680,7 +680,7 @@ def _make_logger(name, filename):
     lg = logging.getLogger(name)
     handler = logging.handlers.RotatingFileHandler(
         os.path.join(LOG_DIR, filename),
-        maxBytes=128 * 1024 * 1024,
+        maxBytes=4 * 1024 * 1024,
         backupCount=10
     )
     fmt = logging.Formatter("%(asctime)s %(levelname)s:%(name)s:%(message)s")

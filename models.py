@@ -266,3 +266,41 @@ class ProtectedFaction(db.Model):
     webhook_url = db.Column(db.String(256))
     description = db.Column(db.String(128))
     protected = db.Column(db.Boolean, default=True)
+
+class BGSEvalRun(db.Model):
+    """
+    One row per evaluation run.
+    IMPORTANT: ticktime is the ONLY tick key (string).
+    """
+    __tablename__ = "bgs_eval_run"
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    ticktime = db.Column(db.String(64), nullable=False, index=True)  # ticktime-only
+    created_at = db.Column(db.String(64), nullable=False)            # ISO string
+    eval_type = db.Column(db.String(64), nullable=False)
+    version = db.Column(db.String(32), nullable=False)
+    meta_json = db.Column(db.Text, nullable=True)
+    __table_args__ = (
+        db.Index("idx_bgs_eval_run_ticktime", "ticktime"),
+    )
+
+class BGSEvalResult(db.Model):
+    """
+    One row per (ticktime, system_name, faction).
+    IMPORTANT: ticktime is the ONLY tick key (string).
+    """
+    __tablename__ = "bgs_eval_result"
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    ticktime = db.Column(db.String(64), nullable=False, index=True)     # ticktime-only
+    system_name = db.Column(db.String(128), nullable=False, index=True)
+    faction = db.Column(db.String(128), nullable=False, index=True)
+    total_effect = db.Column(db.Float, nullable=False)
+    breakdown_json = db.Column(db.Text, nullable=True)
+    cmdr_count = db.Column(db.Integer, nullable=True)
+    cmdr_json = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.String(64), nullable=False)               # ISO string
+    __table_args__ = (
+        db.UniqueConstraint("ticktime", "system_name", "faction", name="uq_bgs_eval_result"),
+        db.Index("idx_bgs_eval_result_ticktime", "ticktime"),
+        db.Index("idx_bgs_eval_result_system", "system_name"),
+        db.Index("idx_bgs_eval_result_faction", "faction"),
+    )

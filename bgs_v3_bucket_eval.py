@@ -1718,17 +1718,19 @@ def _send_bucket_to_discord(
     # Discord output
     # -------------------------------------------------------------------------
     for t in tenants:
-        webhook_url = get_discord_webhook(t, "bullis")
+        #webhook_url = get_discord_webhook(t, "bullis")
+        webhook_url = get_discord_webhook(t, "bgs")
         if not webhook_url:
             logger.warning(f"No webhook for tenant {t.get('name')}")
-            results.append({"tenant": t.get("name"), "status": "no_webhook"})
+            results.append({"tenant": t.get("name"), "system": None, "status": "no_webhook"})
             continue
 
         period_label = period if period != "all" else "All Time"
         tick_label = ticktime or tickid or period_label
 
         # --- SEND HEADER MESSAGE FIRST (per tenant) ---
-        has_systems_to_send = False
+        # Determine exactly how many system messages would be sent for this tenant (respecting faction filter)
+        systems_to_send = []
         for _sysname, _rows in systems.items():
             _rows_sorted = sorted(
                 _rows,
@@ -1738,12 +1740,12 @@ def _send_bucket_to_discord(
             if faction:
                 _rows_sorted = [r for r in _rows_sorted if (r.get("faction") or "") == faction] or _rows_sorted
             if _rows_sorted:
-                has_systems_to_send = True
-                break
+                systems_to_send.append((_sysname, _rows_sorted))
 
-        if not has_systems_to_send:
+        if not systems_to_send:
             logger.info(f"Skipping Discord header for tenant {t.get('name')} - no systems to send.")
         else:
+            # Only send header if there will be at least one system message following
             try:
                 header_msg = (
                     "## BGS v3 - 'The 4 Bucket' Evaluation\n"
@@ -1773,18 +1775,16 @@ def _send_bucket_to_discord(
                 logger.exception(f"Discord header send failed for tenant={t.get('name')}")
                 results.append({"tenant": t.get("name"), "system": None, "status": "header_exception", "error": str(e)})
 
-        for system_name, rows in systems.items():
+        # Track counters for this tenant so we can log Info about how many messages were sent
+        tenant_sent = 0
+        tenant_errors = 0
+
+        for system_name, rows in systems_to_send if systems_to_send else []:
             rows_sorted = sorted(
                 rows,
                 key=lambda r: (float(r.get("total_points", 0.0) or 0.0), int(r.get("total_credits", 0) or 0)),
                 reverse=True,
             )
-
-            if faction:
-                rows_sorted = [r for r in rows_sorted if (r.get("faction") or "") == faction] or rows_sorted
-
-            if not rows_sorted:
-                continue
 
             sys_total_points = sum(float(r.get("total_points", 0.0) or 0.0) for r in rows_sorted)
             sys_total_credits = sum(int(r.get("total_credits", 0) or 0) for r in rows_sorted)
@@ -1942,6 +1942,7 @@ def _send_bucket_to_discord(
                         "status": "discord_error",
                         "code": resp.status_code
                     })
+                    tenant_errors += 1
                 else:
                     results.append({
                         "tenant": t.get("name"),
@@ -1949,6 +1950,7 @@ def _send_bucket_to_discord(
                         "status": "sent",
                         "chart_attached": bool(file_payload)
                     })
+                    tenant_sent += 1
                     try:
                         logger.info(f"Discord message sent tenant={t.get('name')} system={system_name} chart_attached={bool(file_payload)}")
                     except Exception:
@@ -1962,5 +1964,10 @@ def _send_bucket_to_discord(
                     "status": "exception",
                     "error": str(e)
                 })
+                tenant_errors += 1
 
-    return results
+        # After processing tenant, log summary info
+        try:
+            logger.info(f"Discord dispatch summary tenant={t.get('name')} sent={tenant_sent} errors={tenant_errors} systems_considered={len(systems)} systems_sent={len(systems_to_send) if systems_to_send else 0}")
+        except Exception:
+            pass

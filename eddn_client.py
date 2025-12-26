@@ -207,51 +207,85 @@ def save_system_tick_snapshot(snapshot_session, data: dict):
     """
     Snapshot settlement logic (Option 1) using *ticktime string only* (no tickid).
 
-    Key idea:
-      - EDDN updates can lag behind the real tick by hours.
-      - We decide whether an incoming EDDN update belongs to the *previous* tick or the *current* tick
-        by comparing Influence/States vs. the last snapshot of the previous tick.
-
-    Storage:
-      - One row per (system_name, ticktime_str)
-      - UNIQUE key: (system_name, ticktime)
-      - Fields:
-          - ticktime: ticktime string (shared file)
-          - system_name
-          - system_address (optional)
-          - payload_json (minimal)
-          - received_at / updated_at
-          - is_settled: indicates that we are confident the system has "arrived" in the new tick
-
-    Settlement workflow:
-      1) Ensure a placeholder row exists for (system_name, current_ticktime) with is_settled=False
-      2) If the placeholder is already settled:
-           -> always write updates into the current tick row
-      3) Else (not settled yet):
-           - find previous tick row (latest snapshot for system with ticktime != current_ticktime)
-           - compare incoming signature vs previous signature
-             a) unchanged -> update previous tick row (update still belongs to old tick)
-             b) changed   -> write into current tick row and set is_settled=True
+    (… Docstring unverändert …)
     """
+    # ---- Config: adjust if needed (typical values: 6..12 hours) ----
+    SETTLE_AFTER_HOURS = 8
+
+    def _parse_ticktime_dt(ticktime: str):
+        if not ticktime:
+            return None
+        s = str(ticktime).strip()
+        try:
+            if s.endswith("Z") and "." in s:
+                return datetime.strptime(s, "%Y-%m-%dT%H:%M:%S.%fZ")
+            if s.endswith("Z"):
+                return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ")
+            return datetime.fromisoformat(s.replace("Z", ""))
+        except Exception:
+            return None
+
+    def _branch(name: str, **kw):
+        """
+        Emits a single, explicit branch marker so you can grep for it quickly:
+          BRANCH=INSERT / UPDATE_PREV / SETTLE / UPDATE_CURRENT / FORCE_SETTLE
+
+        Example:
+          [SNAPSHOT][BRANCH] INSERT system='Wolf 485a' tick='...' prev='...' settled=False age_h=...
+        """
+        # keep branch log short but informative
+        base = {
+            "system": kw.pop("system", None),
+            "tick": kw.pop("tick", None),
+            "prev": kw.pop("prev", None),
+            "settled": kw.pop("settled", None),
+            "age_h": kw.pop("age_h", None),
+            "reason": kw.pop("reason", None),
+        }
+        # merge any extra custom fields
+        base.update(kw)
+
+        parts = [f"BRANCH={name}"]
+        if base.get("system") is not None:
+            parts.append(f"system='{base['system']}'")
+        if base.get("tick") is not None:
+            parts.append(f"tick='{base['tick']}'")
+        if base.get("prev") is not None:
+            parts.append(f"prev='{base['prev']}'")
+        if base.get("settled") is not None:
+            parts.append(f"settled={base['settled']}")
+        if base.get("age_h") is not None:
+            try:
+                parts.append(f"age_h={float(base['age_h']):.2f}")
+            except Exception:
+                parts.append(f"age_h={base['age_h']}")
+        if base.get("reason") is not None:
+            parts.append(f"reason='{base['reason']}'")
+
+        # any remaining keys
+        for k, v in base.items():
+            if k in ("system", "tick", "prev", "settled", "age_h", "reason"):
+                continue
+            if v is None:
+                continue
+            parts.append(f"{k}={v!r}")
+
+        logger_snapshot.debug("[SNAPSHOT][BRANCH] " + " ".join(parts))
+
     msg = data.get("message", {}) or {}
     system_name = msg.get("StarSystem")
     if not system_name:
         logger_snapshot.debug("[SNAPSHOT] Skip: no StarSystem in message.")
         return
 
-    # Ticktime is shared cross-process via db/last_tick.json written by fdev_tick_monitor.py (app.py process).
     ticktime_str = get_current_ticktime_string()
     if not ticktime_str:
-        # get_current_ticktime_string already logs rate-limited
         return
 
     now = datetime.utcnow()
     system_address = msg.get("SystemAddress")
 
-    # Build normalized payload once (avoid recomputing multiple times)
     incoming_payload = _build_snapshot_payload(data)
-
-    # Compute signature once
     incoming_sig = _snapshot_signature(data)
 
     logger_snapshot.debug(
@@ -263,7 +297,6 @@ def save_system_tick_snapshot(snapshot_session, data: dict):
         data.get("$schemaRef"),
     )
 
-    # Latest snapshot for this system (any ticktime)
     latest = (snapshot_session.query(SystemTickSnapshot)
               .filter(SystemTickSnapshot.system_name == system_name)
               .order_by(SystemTickSnapshot.ticktime.desc(),
@@ -282,7 +315,6 @@ def save_system_tick_snapshot(snapshot_session, data: dict):
     else:
         logger_snapshot.debug("[SNAPSHOT] Latest row: system='%s' none (DB empty for system).", system_name)
 
-    # Ensure placeholder for current ticktime exists
     current_row = (snapshot_session.query(SystemTickSnapshot)
                    .filter(SystemTickSnapshot.system_name == system_name,
                            SystemTickSnapshot.ticktime == ticktime_str)
@@ -301,6 +333,7 @@ def save_system_tick_snapshot(snapshot_session, data: dict):
         snapshot_session.add(current_row)
         snapshot_session.flush()
 
+        _branch("INSERT", system=system_name, tick=ticktime_str, settled=False)
         logger_snapshot.info(
             "[SNAPSHOT] INSERT current placeholder: system='%s' ticktime='%s' settled=%s",
             system_name, ticktime_str, bool(current_row.is_settled)
@@ -315,19 +348,18 @@ def save_system_tick_snapshot(snapshot_session, data: dict):
             current_row.updated_at,
         )
 
-    # If current tick is already settled: always write to it.
     if current_row.is_settled:
         current_row.payload_json = incoming_payload
         current_row.updated_at = now
         snapshot_session.flush()
 
+        _branch("UPDATE_CURRENT", system=system_name, tick=ticktime_str, settled=True)
         logger_snapshot.info(
             "[SNAPSHOT] UPDATE current (already settled): system='%s' ticktime='%s'",
             system_name, ticktime_str
         )
         return
 
-    # Find previous ticktime row (latest snapshot with ticktime != current ticktime)
     prev_row = None
     if latest and latest.ticktime != ticktime_str:
         prev_row = latest
@@ -340,20 +372,18 @@ def save_system_tick_snapshot(snapshot_session, data: dict):
                     .first())
 
     if not prev_row:
-        # First ever row for this system, or only current tick exists.
-        # With no previous signature, we cannot classify as "unchanged", so we treat as "changed" and settle.
         current_row.payload_json = incoming_payload
         current_row.updated_at = now
         current_row.is_settled = True
         snapshot_session.flush()
 
+        _branch("SETTLE", system=system_name, tick=ticktime_str, prev=None, settled=True, reason="no_prev_row")
         logger_snapshot.info(
             "[SNAPSHOT] SETTLE current (no previous row): system='%s' ticktime='%s' reason='no_prev_row'",
             system_name, ticktime_str
         )
         return
 
-    # Compute previous signature from stored payload_json (which is stored in snapshot format)
     prev_sig = None
     try:
         prev_sig = _snapshot_signature({"message": prev_row.payload_json})
@@ -373,25 +403,64 @@ def save_system_tick_snapshot(snapshot_session, data: dict):
         (incoming_sig[:8] if incoming_sig else None),
     )
 
-    # If unchanged: update previous row (still belongs to old tick)
     if prev_sig and incoming_sig == prev_sig:
+        tick_dt = _parse_ticktime_dt(ticktime_str)
+        age_hours = None
+        if tick_dt:
+            try:
+                age_hours = max(0.0, (now - tick_dt).total_seconds()) / 3600.0
+            except Exception:
+                age_hours = None
+
+        if age_hours is not None and age_hours >= float(SETTLE_AFTER_HOURS):
+            current_row.payload_json = incoming_payload
+            current_row.updated_at = now
+            current_row.is_settled = True
+            snapshot_session.flush()
+
+            _branch(
+                "FORCE_SETTLE",
+                system=system_name,
+                tick=ticktime_str,
+                prev=prev_row.ticktime,
+                settled=True,
+                age_h=age_hours,
+                threshold_h=SETTLE_AFTER_HOURS,
+            )
+            logger_snapshot.info(
+                "[SNAPSHOT] FORCE-SETTLE current (unchanged but age>=threshold): "
+                "system='%s' prev_ticktime='%s' curr_ticktime='%s' age_hours=%.2f threshold=%sh",
+                system_name, prev_row.ticktime, ticktime_str, age_hours, SETTLE_AFTER_HOURS
+            )
+            return
+
         prev_row.payload_json = incoming_payload
         prev_row.updated_at = now
         snapshot_session.flush()
 
+        _branch(
+            "UPDATE_PREV",
+            system=system_name,
+            tick=ticktime_str,
+            prev=prev_row.ticktime,
+            settled=False,
+            age_h=age_hours,
+            threshold_h=SETTLE_AFTER_HOURS,
+        )
         logger_snapshot.info(
-            "[SNAPSHOT] UPDATE prev (unchanged -> still old tick): system='%s' prev_ticktime='%s' curr_ticktime='%s'",
-            system_name, prev_row.ticktime, ticktime_str
+            "[SNAPSHOT] UPDATE prev (unchanged -> still old tick): system='%s' prev_ticktime='%s' curr_ticktime='%s'%s",
+            system_name, prev_row.ticktime, ticktime_str,
+            (f" age_hours={age_hours:.2f} (<{SETTLE_AFTER_HOURS}h)" if age_hours is not None else "")
         )
         return
 
-    # Change detected (or prev_sig missing): settle current tick and write there
     current_row.payload_json = incoming_payload
     current_row.updated_at = now
     current_row.is_settled = True
     snapshot_session.flush()
 
     reason = "sig_changed" if prev_sig else "prev_sig_missing"
+    _branch("SETTLE", system=system_name, tick=ticktime_str, prev=prev_row.ticktime, settled=True, reason=reason)
     logger_snapshot.info(
         "[SNAPSHOT] SETTLE current (change detected): system='%s' prev_ticktime='%s' curr_ticktime='%s' reason='%s'",
         system_name, prev_row.ticktime, ticktime_str, reason

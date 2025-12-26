@@ -121,18 +121,50 @@ def start_tick_watch_scheduler():
     def _convert_to_iso8601(tick_str: str) -> str:
         """
         Convert tick string to ISO-8601 if possible; otherwise return original.
+        Ensures output is in the form: YYYY-MM-DDTHH:MM:SSZ (no fractional seconds).
+        Handles inputs like:
+          - 25-12-21T10:40:53.000Z  -> 2025-12-21T10:40:53Z
+          - 2025-12-21T10:40:53.000Z -> 2025-12-21T10:40:53Z
+          - 2025-12-21 10:40:53      -> 2025-12-21T10:40:53Z
         """
         if not tick_str:
             return tick_str
         try:
-            # already ISO-like?
-            if "T" in tick_str and (tick_str.endswith("Z") or "+" in tick_str):
-                return tick_str
-            # try common formats
-            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+            ts = tick_str.strip()
+
+            # If already looks like ISO with timezone 'Z' or offset, normalize by removing fractional seconds
+            # e.g. 2025-12-21T10:40:53.000Z -> 2025-12-21T10:40:53Z
+            if "T" in ts and ts.endswith("Z"):
+                # remove fractional seconds if present
+                body = ts[:-1]
+                if "." in body:
+                    body = body.split('.', 1)[0]
+                # If year is two-digit like 25-12-21, we'll fall through to parsing below
+                parts = body.split("T", 1)
+                date_part = parts[0]
+                # detect 4-digit year
+                if len(date_part) >= 10 and date_part[4] == '-':
+                    return f"{body}Z"
+
+            # Try parsing several known formats, including two-digit year with T and optional fractional seconds
+            fmt_candidates = [
+                "%Y-%m-%dT%H:%M:%S",
+                "%Y-%m-%d %H:%M:%S",
+                "%Y-%m-%dT%H:%M",
+                "%Y-%m-%d %H:%M",
+                "%y-%m-%dT%H:%M:%S",
+                "%y-%m-%dT%H:%M:%S.%f",
+                "%y-%m-%dT%H:%M",
+                "%d-%m-%yT%H:%M:%S",
+            ]
+
+            for fmt in fmt_candidates:
                 try:
-                    dt = datetime.strptime(tick_str, fmt)
-                    return dt.isoformat(timespec="seconds") + "Z"
+                    # strip trailing Z if present for strptime
+                    candidate = ts[:-1] if ts.endswith("Z") else ts
+                    dt = datetime.strptime(candidate, fmt)
+                    # For two-digit years, strptime will map yr 00-68 -> 2000-2068, 69-99 -> 1969-1999; this matches common expectations for recent ticks
+                    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
                 except Exception:
                     pass
         except Exception:
@@ -153,18 +185,21 @@ def start_tick_watch_scheduler():
             return
 
         endpoint = "/api/bgs/v3/bucket/discord"
-        base_url = flask_server_url.rstrip("/") + endpoint
 
         for tenant in TENANTS:
-            tenant_name = tenant.get("name") or "UnknownTenant"
-            apikey = tenant.get("apikey")
-            if not apikey:
-                logging.warning(f"[TickPollZoy] No apikey for tenant {tenant_name}, skipping bucket eval API call.")
+            tenant_name = tenant.get('name') or tenant.get('api_key')
+            api_key = tenant.get('api_key')
+            if not api_key:
+                logging.warning(f"[TickPollZoy] Tenant {tenant_name} has no api_key; skipping API call.")
                 continue
+            api_version = tenant.get('api_version') or os.getenv('API_VERSION_PROD')
 
-            url = base_url
-            headers = {"X-API-Key": apikey}
-            params = {"tickid": iso_tick}
+            url = f"{flask_server_url}{endpoint}"
+            headers = {
+                "apikey": api_key,
+                "apiversion": api_version
+            }
+            params = {"ticktime": iso_tick}
 
             try:
                 logging.info(f"[TickPollZoy] POST {url} for tenant {tenant_name} tickid={iso_tick}")

@@ -6,6 +6,7 @@ requests~=2.32.4
 APScheduler~=3.11.0
 python-dateutil~=2.9.0.post0
 python-dotenv~=1.0.1
+matplotlib~=3.9.4
 pip~=20.3.4
 MarkupSafe~=3.0.2
 werkzeug~=3.1.3

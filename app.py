@@ -16,6 +16,7 @@ import os
 import threading
 import json
 import ast
+from io import BytesIO
 from activities import activities_bp
 from mining import mining_bp
 from sysmap import sysmap_bp
@@ -249,6 +250,149 @@ def get_discord_webhook(webhook_type):
     if tenant and "discord_webhooks" in tenant:
         return tenant["discord_webhooks"].get(webhook_type)
     return None
+
+
+def _parse_ymd(value, field_name):
+    try:
+        return datetime.strptime(value, "%Y-%m-%d")
+    except (TypeError, ValueError):
+        raise ValueError(f"{field_name} must use YYYY-MM-DD")
+
+
+def _period_bounds(period):
+    today = datetime.utcnow()
+    start = end = None
+
+    if period == "cw":
+        start = today - timedelta(days=today.weekday())
+        end = start + timedelta(days=6)
+    elif period == "lw":
+        end = today - timedelta(days=today.weekday() + 1)
+        start = end - timedelta(days=6)
+    elif period == "cm":
+        start = today.replace(day=1)
+        end = (start + relativedelta(months=1)) - timedelta(days=1)
+    elif period == "lm":
+        this_month_start = today.replace(day=1)
+        start = this_month_start - relativedelta(months=1)
+        end = this_month_start - timedelta(days=1)
+    elif period == "2m":
+        this_month_start = today.replace(day=1)
+        start = this_month_start - relativedelta(months=2)
+        end = this_month_start - timedelta(days=1)
+    elif period == "y":
+        start = today.replace(month=1, day=1)
+        end = today.replace(month=12, day=31)
+    elif period == "cd":
+        start = end = today
+    elif period == "ld":
+        start = end = today - timedelta(days=1)
+
+    return start, end
+
+
+def _latest_tickid(offset=0):
+    rows = db.session.execute(
+        text("SELECT DISTINCT tickid FROM event WHERE tickid IS NOT NULL ORDER BY timestamp DESC LIMIT 2")
+    ).fetchall()
+    if not rows:
+        return None
+    if offset == 1 and len(rows) > 1:
+        return rows[1][0]
+    return rows[0][0]
+
+
+def resolve_timeframe(source):
+    period = source.get("period") or "all"
+    from_date = source.get("from_date")
+    to_date = source.get("to_date")
+    group_by = source.get("group_by")
+    timeframe = {
+        "period": period,
+        "group_by_month": group_by == "month",
+        "params": {},
+        "label": "All Time",
+    }
+
+    if from_date or to_date:
+        if not from_date or not to_date:
+            raise ValueError("from_date and to_date must be provided together")
+        start = _parse_ymd(from_date, "from_date")
+        end = _parse_ymd(to_date, "to_date")
+        if start > end:
+            raise ValueError("from_date must be before or equal to to_date")
+        timeframe["params"]["date_from"] = start.strftime("%Y-%m-%dT00:00:00Z")
+        timeframe["params"]["date_to"] = end.strftime("%Y-%m-%dT23:59:59Z")
+        timeframe["label"] = f"{from_date} to {to_date}"
+        return timeframe
+
+    if period in ("ct", "lt"):
+        tickid = _latest_tickid(1 if period == "lt" else 0)
+        timeframe["params"]["tickid"] = tickid
+        timeframe["label"] = f"Tick {tickid}" if tickid else "No Tick"
+        return timeframe
+
+    start, end = _period_bounds(period)
+    if start and end:
+        timeframe["params"]["date_from"] = start.strftime("%Y-%m-%dT00:00:00Z")
+        timeframe["params"]["date_to"] = end.strftime("%Y-%m-%dT23:59:59Z")
+        timeframe["label"] = f"{start.strftime('%Y-%m-%d')} to {end.strftime('%Y-%m-%d')}"
+
+    return timeframe
+
+
+def time_filter_sql(timeframe, alias="e"):
+    params = timeframe.get("params", {})
+    if "tickid" in params:
+        if params["tickid"]:
+            return f"{alias}.tickid = :tickid"
+        return "1=0"
+    if "date_from" in params and "date_to" in params:
+        return f"{alias}.timestamp BETWEEN :date_from AND :date_to"
+    return "1=1"
+
+
+def month_expr(alias="e"):
+    return f"strftime('%Y-%m', {alias}.timestamp)"
+
+
+def summary_query_parts(timeframe, alias="e"):
+    if timeframe.get("group_by_month"):
+        expr = month_expr(alias)
+        return f"{expr} AS month,", f", {expr}", f"month ASC, "
+    return "", "", ""
+
+
+def row_to_dict(row):
+    return dict(row._mapping)
+
+
+def month_slices(timeframe):
+    params = timeframe.get("params", {})
+    if not timeframe.get("group_by_month") or "date_from" not in params or "date_to" not in params:
+        return [(None, timeframe)]
+
+    start = datetime.strptime(params["date_from"][:10], "%Y-%m-%d").replace(day=1)
+    end = datetime.strptime(params["date_to"][:10], "%Y-%m-%d")
+    slices = []
+    current = start
+    while current <= end:
+        month_start = current
+        month_end = (month_start + relativedelta(months=1)) - timedelta(days=1)
+        if month_end > end:
+            month_end = end
+        month_tf = {
+            "period": timeframe.get("period", "all"),
+            "group_by_month": False,
+            "label": month_start.strftime("%Y-%m"),
+            "params": {
+                "date_from": month_start.strftime("%Y-%m-%dT00:00:00Z"),
+                "date_to": month_end.strftime("%Y-%m-%dT23:59:59Z"),
+            },
+        }
+        slices.append((month_start.strftime("%Y-%m"), month_tf))
+        current = month_start + relativedelta(months=1)
+    return slices
 
 
 ##################################################################
@@ -546,6 +690,10 @@ def root():
 @app.route("/api/summary/<key>", methods=["GET"])
 @require_api_key
 def summary_api(key):
+    try:
+        timeframe = resolve_timeframe(request.args)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
     queries = {
         "market-events": """
@@ -705,21 +853,42 @@ def summary_api(key):
             date_filter = "1=1"
 
     # system_name-Filter ergänzen
+    date_filter = time_filter_sql(timeframe, "e")
     system_name = request.args.get("system_name")
     if system_name:
         date_filter = f"{date_filter} AND e.starsystem = :system_name"
 
     sql = sql_template.replace("{date_filter}", date_filter)
 
-    params = {}
+    params = dict(timeframe.get("params", {}))
     if "faction_name LIKE :faction_name_like" in sql:
         params["faction_name_like"] = f"%{g.tenant['faction_name']}%"
     if system_name:
         params["system_name"] = system_name
 
     try:
+        if timeframe.get("group_by_month"):
+            data = []
+            for month, month_tf in month_slices(timeframe):
+                month_filter = time_filter_sql(month_tf, "e")
+                if system_name:
+                    month_filter = f"{month_filter} AND e.starsystem = :system_name"
+                month_sql = sql_template.replace("{date_filter}", month_filter)
+                month_params = dict(month_tf.get("params", {}))
+                if "faction_name LIKE :faction_name_like" in month_sql:
+                    month_params["faction_name_like"] = f"%{g.tenant['faction_name']}%"
+                if system_name:
+                    month_params["system_name"] = system_name
+                rows = db.session.execute(text(month_sql), month_params).fetchall()
+                for row in rows:
+                    item = row_to_dict(row)
+                    if month:
+                        item = {"month": month, **item}
+                    data.append(item)
+            return jsonify(data)
+
         result = db.session.execute(text(sql), params).fetchall()
-        data = [dict(row._mapping) for row in result]
+        data = [row_to_dict(row) for row in result]
         return jsonify(data)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -729,6 +898,10 @@ def summary_api(key):
 @app.route("/api/summary/top5/<key>", methods=["GET"])
 @require_api_key
 def summary_top5_api(key):
+    try:
+        timeframe = resolve_timeframe(request.args)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
     def get_date_filter(period: str):
         today = datetime.utcnow()
@@ -932,30 +1105,172 @@ def summary_top5_api(key):
             date_filter = "1=1"
 
     # system_name-Filter ergänzen
+    date_filter = time_filter_sql(timeframe, "e")
     system_name = request.args.get("system_name")
     if system_name:
         date_filter = f"{date_filter} AND e.starsystem = :system_name"
 
     sql = sql_template.replace("{date_filter}", date_filter)
 
-    params = {}
+    params = dict(timeframe.get("params", {}))
     if "faction_name LIKE :faction_name_like" in sql:
         params["faction_name_like"] = f"%{g.tenant['faction_name']}%"
     if system_name:
         params["system_name"] = system_name
 
     try:
+        if timeframe.get("group_by_month"):
+            data = []
+            for month, month_tf in month_slices(timeframe):
+                month_filter = time_filter_sql(month_tf, "e")
+                if system_name:
+                    month_filter = f"{month_filter} AND e.starsystem = :system_name"
+                month_sql = sql_template.replace("{date_filter}", month_filter)
+                month_params = dict(month_tf.get("params", {}))
+                if "faction_name LIKE :faction_name_like" in month_sql:
+                    month_params["faction_name_like"] = f"%{g.tenant['faction_name']}%"
+                if system_name:
+                    month_params["system_name"] = system_name
+                rows = db.session.execute(text(month_sql), month_params).fetchall()
+                for row in rows:
+                    item = row_to_dict(row)
+                    if month:
+                        item = {"month": month, **item}
+                    data.append(item)
+            return jsonify(data)
+
         result = db.session.execute(text(sql), params).fetchall()
-        data = [dict(row._mapping) for row in result]
+        data = [row_to_dict(row) for row in result]
         return jsonify(data)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+def build_leaderboard_data(timeframe, system_name=None):
+    date_filter = time_filter_sql(timeframe, "e")
+    date_filter_sub = time_filter_sql(timeframe, "ex")
+    params = dict(timeframe.get("params", {}))
+
+    if system_name:
+        date_filter += " AND e.starsystem = :system_name"
+        date_filter_sub += " AND ex.starsystem = :system_name"
+        params["system_name"] = system_name
+
+    params["faction_name_like"] = f"%{g.tenant['faction_name']}%"
+
+    sql = f"""
+        SELECT e.cmdr,
+           c.squadron_rank AS rank,
+           SUM(CASE WHEN mb.event_id IS NOT NULL THEN mb.value ELSE 0 END) AS total_buy,
+           SUM(CASE WHEN ms.event_id IS NOT NULL THEN ms.value ELSE 0 END) AS total_sell,
+           CASE
+               WHEN SUM(CASE WHEN ms.event_id IS NOT NULL THEN ms.value ELSE 0 END) > 0
+               THEN SUM(CASE WHEN ms.event_id IS NOT NULL THEN ms.value ELSE 0 END)
+                    - SUM(CASE WHEN mb.event_id IS NOT NULL THEN mb.value ELSE 0 END)
+               ELSE 0
+           END AS profit,
+           ROUND(
+             CASE
+               WHEN SUM(CASE WHEN ms.event_id IS NOT NULL THEN ms.value ELSE 0 END) > 0 AND
+                    SUM(CASE WHEN mb.event_id IS NOT NULL THEN mb.value ELSE 0 END) > 0
+               THEN (SUM(CASE WHEN ms.event_id IS NOT NULL THEN ms.value ELSE 0 END)
+                     - SUM(CASE WHEN mb.event_id IS NOT NULL THEN mb.value ELSE 0 END)) * 100.0
+                    / SUM(CASE WHEN mb.event_id IS NOT NULL THEN mb.value ELSE 0 END)
+               ELSE 0
+             END, 2
+           ) AS profitability,
+           SUM(CASE WHEN mb.event_id IS NOT NULL THEN mb.count ELSE 0 END) +
+           SUM(CASE WHEN ms.event_id IS NOT NULL THEN ms.count ELSE 0 END) AS total_quantity,
+           SUM(CASE WHEN mb.event_id IS NOT NULL THEN mb.value ELSE 0 END) +
+           SUM(CASE WHEN ms.event_id IS NOT NULL THEN ms.value ELSE 0 END) AS total_volume,
+           (
+             SELECT COUNT(*)
+             FROM mission_completed_event mc
+             JOIN event ex ON ex.id = mc.event_id
+             WHERE ex.cmdr = e.cmdr AND {date_filter_sub}
+           ) AS missions_completed,
+           (
+             SELECT COUNT(*)
+             FROM mission_failed_event mf
+             JOIN event ex ON ex.id = mf.event_id
+             WHERE ex.cmdr = e.cmdr AND {date_filter_sub}
+           ) AS missions_failed,
+           (
+             SELECT SUM(rv.amount)
+             FROM redeem_voucher_event rv
+             JOIN event ex ON ex.id = rv.event_id
+             WHERE ex.cmdr = e.cmdr AND rv.type = 'bounty' AND {date_filter_sub}
+           ) AS bounty_vouchers,
+           (
+             SELECT SUM(rv.amount)
+             FROM redeem_voucher_event rv
+             JOIN event ex ON ex.id = rv.event_id
+             WHERE ex.cmdr = e.cmdr AND rv.type = 'CombatBond' AND {date_filter_sub}
+           ) AS combat_bonds,
+           (
+             SELECT SUM(t.total_sales)
+             FROM (
+               SELECT se.earnings AS total_sales
+               FROM sell_exploration_data_event se
+               JOIN event ex ON ex.id = se.event_id
+               WHERE ex.cmdr = e.cmdr AND {date_filter_sub}
+               UNION ALL
+               SELECT me.total_earnings AS total_sales
+               FROM multi_sell_exploration_data_event me
+               JOIN event ex ON ex.id = me.event_id
+               WHERE ex.cmdr = e.cmdr AND {date_filter_sub}
+             ) t
+           ) AS exploration_sales,
+           (
+             SELECT SUM(LENGTH(mci.influence))
+             FROM mission_completed_influence mci
+             JOIN mission_completed_event mce ON mce.event_id = mci.mission_id
+             JOIN event ex ON ex.id = mce.event_id
+             WHERE ex.cmdr = e.cmdr
+             AND mci.faction_name LIKE :faction_name_like
+             AND {date_filter_sub}
+           ) AS influence_eic,
+           (
+             SELECT SUM(cc.bounty)
+             FROM commit_crime_event cc
+             JOIN event ex ON ex.id = cc.event_id
+             WHERE ex.cmdr = e.cmdr AND {date_filter_sub}
+           ) AS bounty_fines
+        FROM event e
+        LEFT JOIN cmdr c ON c.name = e.cmdr
+        LEFT JOIN market_buy_event mb ON mb.event_id = e.id
+        LEFT JOIN market_sell_event ms ON ms.event_id = e.id
+        WHERE e.cmdr IS NOT NULL AND {date_filter}
+        GROUP BY e.cmdr
+        ORDER BY e.cmdr
+    """
+    result = db.session.execute(text(sql), params).fetchall()
+    return [row_to_dict(row) for row in result]
 
 
 # Summary Leaderboard Endpoint
 @app.route("/api/summary/leaderboard", methods=["GET"])
 @require_api_key
 def leaderboard_summary():
+    try:
+        timeframe = resolve_timeframe(request.args)
+        system_name = request.args.get("system_name")
+
+        if timeframe.get("group_by_month"):
+            data = []
+            for month, month_tf in month_slices(timeframe):
+                for item in build_leaderboard_data(month_tf, system_name):
+                    if month:
+                        item = {"month": month, **item}
+                    data.append(item)
+            return jsonify(data)
+
+        return jsonify(build_leaderboard_data(timeframe, system_name))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
     try:
         period = request.args.get("period", "all")
         today = datetime.utcnow()
@@ -1430,6 +1745,335 @@ def delete_cmdr(name):
 ##################################################################
 # Discord Webhook Funktionen
 ##################################################################
+
+REPORT_METRICS = {
+    "market-events": ("Market Events", ["cmdr", "total_buy", "total_sell", "total_transaction_volume", "total_trade_quantity"]),
+    "missions-completed": ("Missions Completed", ["cmdr", "missions_completed"]),
+    "missions-failed": ("Missions Failed", ["cmdr", "missions_failed"]),
+    "influence-by-faction": ("Influence by Faction", ["cmdr", "faction_name", "influence"]),
+    "influence-eic": ("Influence EIC", ["cmdr", "faction_name", "influence"]),
+    "bounty-vouchers": ("Bounty Vouchers", ["cmdr", "bounty_vouchers"]),
+    "combat-bonds": ("Combat Bonds", ["cmdr", "combat_bonds"]),
+    "exploration-sales": ("Exploration Sales", ["cmdr", "total_exploration_sales"]),
+    "bounty-fines": ("Bounty Fines", ["cmdr", "bounty_fines"]),
+}
+
+LEADERBOARD_METRICS = {
+    "total_volume": "Market Volume",
+    "profit": "Profit",
+    "bounty_vouchers": "Bounty Vouchers",
+    "combat_bonds": "Combat Bonds",
+    "exploration_sales": "Exploration Sales",
+    "missions_completed": "Missions Completed",
+    "missions_failed": "Missions Failed",
+    "influence_eic": "Influence EIC",
+    "bounty_fines": "Bounty Fines",
+}
+
+
+def _fmt_report_value(value):
+    if value is None:
+        return ""
+    if isinstance(value, float):
+        if value.is_integer():
+            return f"{int(value):,}"
+        return f"{value:,.2f}"
+    if isinstance(value, int):
+        return f"{value:,}"
+    return str(value)
+
+
+def _fixed_table(rows, columns, max_rows=20):
+    selected = rows[:max_rows]
+    widths = {}
+    for key, label in columns:
+        values = [label] + [_fmt_report_value(row.get(key)) for row in selected]
+        widths[key] = min(max(len(v) for v in values), 28)
+
+    def fit(value, width):
+        value = _fmt_report_value(value)
+        if len(value) > width:
+            return value[: max(0, width - 3)] + "..."
+        return value
+
+    header = " | ".join(f"{fit(label, widths[key]):<{widths[key]}}" for key, label in columns)
+    sep = "-+-".join("-" * widths[key] for key, _ in columns)
+    lines = [header, sep]
+    for row in selected:
+        parts = []
+        for key, _ in columns:
+            value = fit(row.get(key), widths[key])
+            align = ">" if isinstance(row.get(key), (int, float)) else "<"
+            parts.append(f"{value:{align}{widths[key]}}")
+        lines.append(" | ".join(parts))
+    if len(rows) > max_rows:
+        lines.append(f"... {len(rows) - max_rows} more rows omitted")
+    return "\n".join(lines)
+
+
+def _chart_png(rows, label_key, value_key, title, max_rows=12):
+    chart_rows = []
+    for row in rows:
+        try:
+            value = float(row.get(value_key) or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value:
+            label = str(row.get(label_key) or row.get("cmdr") or row.get("month") or "?")
+            chart_rows.append((label, value))
+    chart_rows = sorted(chart_rows, key=lambda item: item[1], reverse=True)[:max_rows]
+    if not chart_rows:
+        return None
+
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        fig, ax = plt.subplots(figsize=(9, 4.8))
+        labels = [item[0][:22] for item in chart_rows]
+        values = [item[1] for item in chart_rows]
+        ax.bar(labels, values, color="#4f8cff")
+        ax.set_title(title)
+        ax.tick_params(axis="x", rotation=35)
+        ax.grid(axis="y", alpha=0.25)
+        fig.tight_layout()
+        buf = BytesIO()
+        fig.savefig(buf, format="png", dpi=140)
+        plt.close(fig)
+        buf.seek(0)
+        return buf.read()
+    except Exception as e:
+        logger.warning(f"Report chart rendering failed for {title}: {e}")
+        return None
+
+
+def _send_discord_report_message(webhook_url, content, embed_title, embed_description, filename=None, png_bytes=None):
+    if len(content) > 1900:
+        content = content[:1850]
+        if "```text" in content:
+            content = content.rstrip("` \n") + "\n...\n```"
+        else:
+            content = content.rstrip() + "\n..."
+
+    embed = {
+        "title": embed_title,
+        "description": embed_description[:3900],
+        "color": 0x4F8CFF,
+    }
+    payload = {"content": content, "embeds": [embed], "allowed_mentions": {"parse": []}}
+    if filename and png_bytes:
+        embed["image"] = {"url": f"attachment://{filename}"}
+        resp = http_requests.post(
+            webhook_url,
+            data={"payload_json": json.dumps(payload)},
+            files={"file": (filename, png_bytes, "image/png")},
+            timeout=20,
+        )
+    else:
+        resp = http_requests.post(webhook_url, json=payload, timeout=20)
+    return resp
+
+
+def _query_report_metric(key, timeframe, top5=False):
+    limit_sql = " LIMIT 5" if top5 else ""
+    queries = {
+        "market-events": f"""
+            SELECT e.cmdr,
+                SUM(COALESCE(mb.value, 0)) AS total_buy,
+                SUM(COALESCE(ms.value, 0)) AS total_sell,
+                SUM(COALESCE(mb.value, 0)) + SUM(COALESCE(ms.value, 0)) AS total_transaction_volume,
+                SUM(COALESCE(mb.count, 0)) + SUM(COALESCE(ms.count, 0)) AS total_trade_quantity
+            FROM event e
+            LEFT JOIN market_buy_event mb ON mb.event_id = e.id
+            LEFT JOIN market_sell_event ms ON ms.event_id = e.id
+            WHERE e.cmdr IS NOT NULL AND {{date_filter}}
+            GROUP BY e.cmdr
+            HAVING total_transaction_volume > 0
+            ORDER BY total_trade_quantity DESC{limit_sql}
+        """,
+        "missions-completed": f"""
+            SELECT e.cmdr, COUNT(*) AS missions_completed
+            FROM mission_completed_event mc
+            JOIN event e ON e.id = mc.event_id
+            WHERE e.cmdr IS NOT NULL AND {{date_filter}}
+            GROUP BY e.cmdr
+            ORDER BY missions_completed DESC{limit_sql}
+        """,
+        "missions-failed": f"""
+            SELECT e.cmdr, COUNT(*) AS missions_failed
+            FROM mission_failed_event mf
+            JOIN event e ON e.id = mf.event_id
+            WHERE e.cmdr IS NOT NULL AND {{date_filter}}
+            GROUP BY e.cmdr
+            ORDER BY missions_failed DESC{limit_sql}
+        """,
+        "influence-by-faction": f"""
+            SELECT e.cmdr, mci.faction_name, SUM(LENGTH(mci.influence)) AS influence
+            FROM mission_completed_influence mci
+            JOIN mission_completed_event mce ON mce.event_id = mci.mission_id
+            JOIN event e ON e.id = mce.event_id
+            WHERE e.cmdr IS NOT NULL AND {{date_filter}}
+            GROUP BY e.cmdr, mci.faction_name
+            ORDER BY influence DESC, e.cmdr{limit_sql}
+        """,
+        "influence-eic": f"""
+            SELECT e.cmdr, mci.faction_name, SUM(LENGTH(mci.influence)) AS influence
+            FROM mission_completed_influence mci
+            JOIN mission_completed_event mce ON mce.event_id = mci.mission_id
+            JOIN event e ON e.id = mce.event_id
+            WHERE e.cmdr IS NOT NULL AND mci.faction_name LIKE :faction_name_like AND {{date_filter}}
+            GROUP BY e.cmdr, mci.faction_name
+            ORDER BY influence DESC, e.cmdr{limit_sql}
+        """,
+        "bounty-vouchers": f"""
+            SELECT e.cmdr, SUM(rv.amount) AS bounty_vouchers
+            FROM redeem_voucher_event rv
+            JOIN event e ON e.id = rv.event_id
+            WHERE e.cmdr IS NOT NULL AND rv.type = 'bounty' AND {{date_filter}}
+            GROUP BY e.cmdr
+            ORDER BY bounty_vouchers DESC{limit_sql}
+        """,
+        "combat-bonds": f"""
+            SELECT e.cmdr, SUM(rv.amount) AS combat_bonds
+            FROM redeem_voucher_event rv
+            JOIN event e ON e.id = rv.event_id
+            WHERE e.cmdr IS NOT NULL AND rv.type = 'CombatBond' AND {{date_filter}}
+            GROUP BY e.cmdr
+            ORDER BY combat_bonds DESC{limit_sql}
+        """,
+        "exploration-sales": f"""
+            SELECT cmdr, SUM(total_sales) AS total_exploration_sales
+            FROM (
+                SELECT e.cmdr, se.earnings AS total_sales
+                FROM sell_exploration_data_event se
+                JOIN event e ON e.id = se.event_id
+                WHERE e.cmdr IS NOT NULL AND {{date_filter}}
+                UNION ALL
+                SELECT e.cmdr, ms.total_earnings AS total_sales
+                FROM multi_sell_exploration_data_event ms
+                JOIN event e ON e.id = ms.event_id
+                WHERE e.cmdr IS NOT NULL AND {{date_filter}}
+            )
+            GROUP BY cmdr
+            ORDER BY total_exploration_sales DESC{limit_sql}
+        """,
+        "bounty-fines": f"""
+            SELECT e.cmdr, SUM(cc.bounty) AS bounty_fines
+            FROM commit_crime_event cc
+            JOIN event e ON e.id = cc.event_id
+            WHERE e.cmdr IS NOT NULL AND {{date_filter}}
+            GROUP BY e.cmdr
+            ORDER BY bounty_fines DESC{limit_sql}
+        """,
+    }
+    sql_template = queries[key]
+    data = []
+    slices = month_slices(timeframe) if timeframe.get("group_by_month") else [(None, timeframe)]
+    for month, month_tf in slices:
+        date_filter = time_filter_sql(month_tf, "e")
+        sql = sql_template.replace("{date_filter}", date_filter)
+        params = dict(month_tf.get("params", {}))
+        if "faction_name_like" in sql:
+            params["faction_name_like"] = f"%{g.tenant['faction_name']}%"
+        rows = db.session.execute(text(sql), params).fetchall()
+        for row in rows:
+            item = row_to_dict(row)
+            if month:
+                item = {"month": month, **item}
+            data.append(item)
+    return data
+
+
+@app.route("/api/summary/discord/report", methods=["POST"])
+@require_api_key
+def send_summary_report_to_discord():
+    try:
+        payload = request.get_json(silent=True) or {}
+        page = payload.get("page")
+        mode = payload.get("mode", "full")
+        webhook_url = get_discord_webhook(payload.get("webhook_type", "shoutout"))
+        tenant_name = g.tenant.get("name") or g.tenant.get("api_key")
+
+        if not webhook_url:
+            return jsonify({"status": "no_webhook", "tenant": tenant_name}), 200
+
+        timeframe = resolve_timeframe(payload)
+        top_n = int(payload.get("top_n") or 20)
+        sent = 0
+        errors = []
+
+        if page == "leaderboard":
+            rows = []
+            if timeframe.get("group_by_month"):
+                for month, month_tf in month_slices(timeframe):
+                    for item in build_leaderboard_data(month_tf):
+                        rows.append({"month": month, **item})
+            else:
+                rows = build_leaderboard_data(timeframe)
+            if not rows:
+                return jsonify({"status": "no_data", "tenant": tenant_name, "page": page}), 200
+
+            table_cols = [("month", "Month")] if timeframe.get("group_by_month") else []
+            table_cols += [("cmdr", "Cmdr"), ("rank", "Rank"), ("total_volume", "Volume"), ("profit", "Profit"),
+                           ("bounty_vouchers", "Bounty"), ("combat_bonds", "CBs"), ("exploration_sales", "Expo"),
+                           ("missions_completed", "Missions")]
+            table = _fixed_table(rows, table_cols, top_n)
+            content = f"**{tenant_name} - Leaderboard ({timeframe['label']})**\n```text\n{table}\n```"
+            for metric_key, metric_label in LEADERBOARD_METRICS.items():
+                metric_rows = sorted(rows, key=lambda r: float(r.get(metric_key) or 0), reverse=True)
+                if not any(float(r.get(metric_key) or 0) for r in metric_rows):
+                    continue
+                png = _chart_png(metric_rows, "cmdr", metric_key, f"{metric_label} - {timeframe['label']}")
+                filename = f"leaderboard_{metric_key}.png" if png else None
+                resp = _send_discord_report_message(
+                    webhook_url, content if sent == 0 else "",
+                    f"Leaderboard - {metric_label}",
+                    f"{tenant_name} | {timeframe['label']}",
+                    filename, png,
+                )
+                if resp.status_code not in (200, 204):
+                    errors.append({"metric": metric_key, "status_code": resp.status_code, "response": resp.text})
+                else:
+                    sent += 1
+
+        elif page == "evaluations":
+            top5 = str(mode).lower() in ("top5", "top 5")
+            for key, (title, cols) in REPORT_METRICS.items():
+                rows = _query_report_metric(key, timeframe, top5=top5)
+                if not rows:
+                    continue
+                value_key = cols[-1]
+                table_cols = [("month", "Month")] if timeframe.get("group_by_month") else []
+                table_cols += [(col, col.replace("_", " ").title()) for col in cols]
+                table = _fixed_table(rows, table_cols, top_n)
+                content = f"**{tenant_name} - {title} ({timeframe['label']})**\n```text\n{table}\n```"
+                png = _chart_png(rows, "cmdr", value_key, f"{title} - {timeframe['label']}")
+                filename = f"evaluations_{key}.png" if png else None
+                resp = _send_discord_report_message(
+                    webhook_url, content, title,
+                    f"{tenant_name} | {timeframe['label']} | {'Top 5' if top5 else 'Full'}",
+                    filename, png,
+                )
+                if resp.status_code not in (200, 204):
+                    errors.append({"metric": key, "status_code": resp.status_code, "response": resp.text})
+                else:
+                    sent += 1
+        else:
+            return jsonify({"error": "page must be 'leaderboard' or 'evaluations'"}), 400
+
+        if sent == 0 and not errors:
+            return jsonify({"status": "no_data", "tenant": tenant_name, "page": page}), 200
+        if errors:
+            return jsonify({"status": "partial_error" if sent else "discord_error", "sent": sent, "errors": errors}), 502
+        return jsonify({"status": "sent", "sent": sent, "tenant": tenant_name, "page": page}), 200
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.exception("Discord summary report failed")
+        return jsonify({"error": str(e)}), 500
+
 
 # Summary Top5 an Discord senden
 @app.route("/api/summary/discord/top5all", methods=["POST"])

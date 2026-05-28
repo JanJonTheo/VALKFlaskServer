@@ -38,6 +38,143 @@ The following API endpoints are available. Their specification is based on the d
 **Activities**
 
 - `PUT /activities` : Add or update activity for a given tick
+- `POST /api/manual/activity` : Submit one manually captured Discord form activity. The bot must not send `tick`, `tickid`, `ticktime`, or `tick_mode`; the server always resolves the current tick at save time. Existing `/activities` and `/events` behavior remains unchanged.
+- `POST /api/manual/activity/undo` : Delete the Discord user's last saved manual activity in the current server-resolved tick.
+- `POST /api/manual/activity/clear-ct` : Delete all saved manual activities for the Discord user in the current server-resolved tick.
+- `GET /api/manual/lookup/systems?q=<query>&limit=25` : Read-only Discord autocomplete for systems.
+- `GET /api/manual/lookup/factions?system=<system>&q=<query>&limit=25` : Read-only Discord autocomplete for factions, optionally scoped to a system.
+- `GET /api/manual/lookup/cmdrs?q=<query>&limit=25` : Read-only Discord autocomplete for commander names.
+
+**Manual Discord Activities**
+
+`POST /api/manual/activity` is the external save endpoint for manual VALKBot BGS activity submissions. It authenticates with the same `apikey` and `apiversion` headers as the existing API, resolves the current tick server-side, resolves `SystemAddress` when possible, writes `manual_activity_submission`, `activity/system/faction`, and matching `event` detail rows in one DB transaction, then posts a BGS-Tally-style Discord webhook server-side after the commit. Webhook failures do not roll back the saved activity. The manual activity Discord webhook is tenant-specific and is configured in `tenant.json`, not `.env`.
+
+`POST /api/manual/activity/undo` and `POST /api/manual/activity/clear-ct` use the same tenant authentication and resolve the current tick server-side. The client must not send tick fields. Ownership is determined by `discord.user_id`; only submissions with `status == "saved"` are affected. Deletion is soft: submissions remain in `manual_activity_submission` with `status = "deleted"` and audit JSON in `error_message`, while generated synthetic `event` detail rows and parent `event` rows are removed and activity aggregates are reversed without going below zero. Webhook messages are kept consistent by updating the remaining grouped message or deleting the message if no saved submissions remain.
+
+For `undo`, the server deletes the latest saved submission for the Discord user in the current tick. If the latest `submission_id` ends with `:combat_bond`, the server removes that suffix and deletes all saved submissions with the same base id, so the CZ activity and its generated combat-bond event are undone together. For `clear-ct`, the server deletes every saved submission for that Discord user in the current tick.
+
+Discord autocomplete uses the read-only `/api/manual/lookup/...` endpoints. They never save activity, events, submissions, or send webhooks, and they never return tick data. Responses are capped at 25 entries and contain only autocomplete-safe fields:
+
+```json
+[
+  {"name": "Synuefe OX-Y b47-0", "address": 1234567890123}
+]
+```
+
+```json
+[
+  {"name": "Valkyries of Trade", "state": "None"}
+]
+```
+
+```json
+[
+  {"name": "JanJonTeo"}
+]
+```
+
+Example payload:
+
+```json
+{
+  "submission_id": "discord:123:456:987",
+  "source": "discord_modal",
+  "discord": {
+    "guild_id": "123",
+    "channel_id": "456",
+    "user_id": "789",
+    "message_id": null,
+    "interaction_id": "987"
+  },
+  "cmdr": "JanJonTeo",
+  "client_timestamp": "2026-05-27T13:49:00Z",
+  "system": {
+    "name": "Synuefe OX-Y b47-0",
+    "address": null
+  },
+  "faction": {
+    "name": "Valkyries of Trade",
+    "state": "None"
+  },
+  "activity": {
+    "type": "bounty_voucher",
+    "amount": 2500000,
+    "count": null,
+    "influence": null,
+    "cz_type": null,
+    "settlement": null
+  },
+  "note": "Manual entry from Discord modal"
+}
+```
+
+Supported `activity.type` values: `bounty_voucher`, `combat_bond`, `exploration_sale`, `mission_completed`, `mission_failed`, `space_cz`, `ground_cz`, `scenario`, `murder_space`, `murder_ground`, `black_market_trade`, `market_buy`, `market_sell`.
+
+Delete request payload for both `/undo` and `/clear-ct`:
+
+```json
+{
+  "source": "discord_modal",
+  "discord": {
+    "guild_id": "123",
+    "channel_id": "456",
+    "user_id": "789",
+    "interaction_id": "undo-987"
+  }
+}
+```
+
+Successful delete response:
+
+```json
+{
+  "status": "deleted",
+  "operation": "undo",
+  "tickid": "tick-1",
+  "ticktime": "2026-05-27T09:00:00Z",
+  "deleted_count": 1,
+  "deleted_activities": [
+    {
+      "submission_id": "discord:123:456:987",
+      "cmdr": "JanJonTeo",
+      "system": "Synuefe OX-Y b47-0",
+      "faction": "Valkyries of Trade",
+      "activity_type": "bounty_voucher",
+      "amount": 2500000,
+      "count": null,
+      "influence": null,
+      "cz_type": null,
+      "settlement": null,
+      "event_ids": [123],
+      "captured_at": "2026-05-27T13:49:00Z",
+      "webhook_status": "posted"
+    }
+  ],
+  "webhook_status": "deleted",
+  "webhook_error": null
+}
+```
+
+If no matching saved submission exists, the delete endpoints return HTTP 200 with `status: "no_op"`, `deleted_count: 0`, an empty `deleted_activities` list, and `webhook_status: "skipped"`.
+
+Manual activity webhook tenant configuration:
+
+```json
+{
+  "name": "Tenant Name",
+  "discord_webhooks": {
+    "manual_activity": "https://discord.com/api/webhooks/..."
+  },
+  "manual_activity_webhook": {
+    "enabled": true,
+    "username": "BGS-Tally Manual",
+    "avatar_url": "",
+    "timeout_seconds": 10
+  }
+}
+```
+
+If `manual_activity_webhook.enabled` is `false`, the submission is saved and `webhook_status` is `disabled`. If `discord_webhooks.manual_activity` is empty or missing, the submission is saved and `webhook_status` is `not_configured`.
 
 **Summary APIs**
 
@@ -138,8 +275,8 @@ The following API endpoints are available. Their specification is based on the d
 
 ## Configuration Files
 
-- `.env` : Global environment variables (API version, webhooks, DB URIs, etc.)
-- `tenant.json` : Per-tenant configuration (API keys, DB URIs, Discord webhooks, etc.)
+- `.env` : Global environment variables (API version, global service settings, etc.)
+- `tenant.json` : Per-tenant configuration (API keys, DB URIs, Discord webhooks, including `discord_webhooks.manual_activity`, etc.)
 
 ---
 

@@ -14,6 +14,7 @@ from models import (
     MarketBuyEvent, MarketSellEvent,
     RedeemVoucherEvent,
     MultiSellExplorationDataEvent, SellExplorationDataEvent,
+    ManualActivitySubmission,
     BGSEvalRun, BGSEvalResult
 )
 
@@ -116,6 +117,41 @@ def ensure_bgs_eval_tables_and_indexes(conn, db_uri: str):
         logger.warning(f"ensure_bgs_eval_tables_and_indexes failed for {db_uri}: {e}")
 
 
+def ensure_manual_activity_submission_table_and_indexes(conn, db_uri: str):
+    """
+    Ensure manual activity audit/idempotency table and key indexes exist.
+    """
+    try:
+        db.Model.metadata.create_all(bind=conn)
+        conn.execute(sqlalchemy.text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_manual_activity_submission_submission_id "
+            "ON manual_activity_submission(submission_id);"
+        ))
+        conn.execute(sqlalchemy.text(
+            "CREATE INDEX IF NOT EXISTS idx_manual_activity_submission_cmdr "
+            "ON manual_activity_submission(cmdr);"
+        ))
+        conn.execute(sqlalchemy.text(
+            "CREATE INDEX IF NOT EXISTS idx_manual_activity_submission_tickid "
+            "ON manual_activity_submission(tickid);"
+        ))
+        conn.execute(sqlalchemy.text(
+            "CREATE INDEX IF NOT EXISTS idx_manual_activity_submission_system_name "
+            "ON manual_activity_submission(system_name);"
+        ))
+        conn.execute(sqlalchemy.text(
+            "CREATE INDEX IF NOT EXISTS idx_manual_activity_submission_faction_name "
+            "ON manual_activity_submission(faction_name);"
+        ))
+        conn.execute(sqlalchemy.text(
+            "CREATE INDEX IF NOT EXISTS idx_manual_activity_submission_activity_type "
+            "ON manual_activity_submission(activity_type);"
+        ))
+        logger.info(f"Tabelle/Indizes 'manual_activity_submission' sichergestellt fuer Tenant: {db_uri}")
+    except Exception as e:
+        logger.warning(f"ensure_manual_activity_submission_table_and_indexes failed for {db_uri}: {e}")
+
+
 # -----------------------------------------------------------------------------
 # Initialisierung (nur DB-Datei + minimal create_all für neue SQLite DBs)
 # -----------------------------------------------------------------------------
@@ -173,7 +209,10 @@ def update_all_tenant_databases():
             # 3) Ensure bgs eval tables + indexes (ticktime-only)
             ensure_bgs_eval_tables_and_indexes(conn, db_uri)
 
-            # 4) SQLite: missing columns via ALTER TABLE
+            # 4) Ensure manual activity submissions
+            ensure_manual_activity_submission_table_and_indexes(conn, db_uri)
+
+            # 5) SQLite: missing columns via ALTER TABLE
             if url.drivername == "sqlite":
                 # --- system ---
                 sys_existing = _get_existing_columns(engine, "system")
@@ -308,6 +347,26 @@ def update_all_tenant_databases():
                                 )
                 except Exception as e:
                     logger.warning(f"sell_exploration_data_event column ensure skipped for {db_uri}: {e}")
+
+                # --- manual_activity_submission ---
+                try:
+                    mas_existing = _get_existing_columns(engine, "manual_activity_submission")
+                    mas_model = _get_model_columns(ManualActivitySubmission)
+                    for col_name, col_obj in mas_model.items():
+                        if col_name not in mas_existing:
+                            col_type = str(col_obj.type)
+                            alter_sql = f'ALTER TABLE manual_activity_submission ADD COLUMN {col_name} {col_type}'
+                            try:
+                                conn.execute(sqlalchemy.text(alter_sql))
+                                logger.info(
+                                    f"Spalte '{col_name}' zu Tabelle 'manual_activity_submission' ergaenzt fuer Tenant: {db_uri}"
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    f"Fehler beim Ergaenzen von Spalte '{col_name}' in 'manual_activity_submission': {e}"
+                                )
+                except Exception as e:
+                    logger.warning(f"manual_activity_submission column ensure skipped for {db_uri}: {e}")
 
         logger.info(f"Tenant-DB aktualisiert: {db_uri}")
 

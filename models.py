@@ -259,6 +259,54 @@ class SyntheticCZ(db.Model):
     cmdr = db.Column(db.String(64))
     station_faction_name = db.Column(db.String(128))
 
+class ManualActivitySubmission(db.Model):
+    __tablename__ = "manual_activity_submission"
+
+    id = db.Column(db.Integer, primary_key=True)
+    submission_id = db.Column(db.String(128), unique=True, nullable=False, index=True)
+    source = db.Column(db.String(64), nullable=False, default="discord_modal")
+
+    discord_guild_id = db.Column(db.String(64))
+    discord_channel_id = db.Column(db.String(64))
+    discord_user_id = db.Column(db.String(64))
+    discord_message_id = db.Column(db.String(64))
+    discord_interaction_id = db.Column(db.String(64))
+
+    cmdr = db.Column(db.String(64), nullable=False, index=True)
+
+    tickid = db.Column(db.String(24), nullable=False, index=True)
+    ticktime = db.Column(db.String(64), nullable=False)
+
+    captured_at = db.Column(db.String(64), nullable=False)
+    client_timestamp = db.Column(db.String(64))
+
+    system_name = db.Column(db.String(128), nullable=False, index=True)
+    system_address = db.Column(db.BigInteger, nullable=False)
+    faction_name = db.Column(db.String(128), nullable=False, index=True)
+    faction_state = db.Column(db.String(64), nullable=False, default="None")
+
+    activity_type = db.Column(db.String(64), nullable=False, index=True)
+    amount = db.Column(db.BigInteger)
+    count = db.Column(db.Integer)
+    influence = db.Column(db.Integer)
+    cz_type = db.Column(db.String(16))
+    settlement = db.Column(db.String(128))
+
+    activity_id = db.Column(db.Integer)
+    event_ids_json = db.Column(db.Text)
+
+    payload_hash = db.Column(db.String(128), nullable=False)
+    payload_json = db.Column(db.Text, nullable=False)
+    note = db.Column(db.Text)
+    status = db.Column(db.String(32), nullable=False, default="saved")
+    error_message = db.Column(db.Text)
+    created_at = db.Column(db.String(64), nullable=False)
+
+    webhook_status = db.Column(db.String(32))
+    webhook_message_id = db.Column(db.String(64))
+    webhook_error = db.Column(db.Text)
+    webhook_posted_at = db.Column(db.String(64))
+
 class ProtectedFaction(db.Model):
     __tablename__ = "protected_faction"
     id = db.Column(db.Integer, primary_key=True)

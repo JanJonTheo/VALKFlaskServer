@@ -20,6 +20,7 @@ from io import BytesIO
 from activities import activities_bp
 from mining import mining_bp
 from sysmap import sysmap_bp
+from manual_activity import manual_activity_bp
 
 # Globaler Lock für alle Schreibzugriffe auf die Tenant-DB (Events & Activities)
 db_write_lock = threading.Lock()
@@ -60,6 +61,7 @@ app = Flask(__name__)
 app.register_blueprint(activities_bp)
 app.register_blueprint(mining_bp)
 app.register_blueprint(sysmap_bp)
+app.register_blueprint(manual_activity_bp)
 
 
 ##################################################################
@@ -1983,6 +1985,237 @@ def _query_report_metric(key, timeframe, top5=False):
                 item = {"month": month, **item}
             data.append(item)
     return data
+
+
+def _fallback_monthly_assessment(monthly_data):
+    rows = []
+    for month in monthly_data:
+        for row in month.get("rows", []):
+            item = dict(row)
+            item["month"] = month.get("month")
+            rows.append(item)
+
+    sorted_rows = sorted(rows, key=lambda r: float(r.get("contribution_score") or 0), reverse=True)
+    growth_rows = [
+        r for r in rows
+        if isinstance(r.get("score_delta"), (int, float)) and r.get("score_delta") is not None
+    ]
+    growth_rows.sort(key=lambda r: float(r.get("score_delta") or 0), reverse=True)
+
+    top_names = ", ".join(
+        f"{r.get('cmdr', 'n/a')} ({r.get('month')}, {float(r.get('contribution_score') or 0):.1f})"
+        for r in sorted_rows[:3]
+    ) or "no data"
+    improvers = ", ".join(
+        f"{r.get('cmdr', 'n/a')} ({r.get('month')}, +{float(r.get('score_delta') or 0):.1f})"
+        for r in growth_rows[:3]
+    ) or "no reliable previous-month comparisons"
+
+    return {
+        "summary": f"Rule-based fallback: the strongest peer-relative contributions came from {top_names}.",
+        "top_performers": top_names,
+        "notable_changes": f"Strongest month-over-month improvements: {improvers}.",
+        "risks_or_gaps": "Review notable peer-relative score drops by checking Missions, Fines, Profit, Bounty Vouchers, Combat Bonds, Exploration, and Influence EIC.",
+        "recommendation": "Focus follow-up on individual Cmdrs whose score trend diverges strongly from their monthly peer group, then inspect the metrics that explain the change.",
+    }
+
+
+MONTHLY_ASSESSMENT_VERSION = "2026-05-07-v5-nested-json-unwrapper"
+
+
+def _normalize_assessment_value(value):
+    if value is None:
+        return ""
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, list):
+        return [_normalize_assessment_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(k): _normalize_assessment_value(v) for k, v in value.items()}
+    return str(value)
+
+
+def _load_assessment_json(text_value):
+    text_value = (text_value or "").strip()
+    if text_value.startswith("```"):
+        text_value = text_value.strip("`").strip()
+        if text_value.lower().startswith("json"):
+            text_value = text_value[4:].strip()
+    return json.loads(text_value)
+
+
+def _parse_assessment_json(text_value):
+    try:
+        parsed = _load_assessment_json(text_value)
+        if isinstance(parsed, dict):
+            summary_value = parsed.get("summary")
+            if isinstance(summary_value, str):
+                try:
+                    nested = _load_assessment_json(summary_value)
+                    if isinstance(nested, dict) and any(
+                        key in nested for key in ("summary", "top_performers", "notable_changes", "risks_or_gaps", "recommendation")
+                    ):
+                        parsed = {**nested, **{k: v for k, v in parsed.items() if k not in nested and v}}
+                except Exception:
+                    pass
+            return {
+                "summary": _normalize_assessment_value(parsed.get("summary", "")),
+                "top_performers": _normalize_assessment_value(parsed.get("top_performers", "")),
+                "notable_changes": _normalize_assessment_value(parsed.get("notable_changes", "")),
+                "risks_or_gaps": _normalize_assessment_value(parsed.get("risks_or_gaps", "")),
+                "recommendation": _normalize_assessment_value(parsed.get("recommendation", "")),
+            }
+    except Exception:
+        pass
+    return {
+        "summary": text_value,
+        "top_performers": "",
+        "notable_changes": "",
+        "risks_or_gaps": "",
+        "recommendation": "",
+    }
+
+
+def _compact_monthly_data(monthly_data):
+    compact_months = []
+    for month in monthly_data:
+        rows = month.get("rows", [])
+        rows = sorted(rows, key=lambda r: float(r.get("contribution_score") or 0), reverse=True)
+        compact_rows = []
+        peer_count = len(rows)
+        for peer_rank, row in enumerate(rows[:12], start=1):
+            metrics = row.get("metrics") or {}
+            compact_rows.append({
+                "cmdr": row.get("cmdr"),
+                "rank": row.get("rank"),
+                "peer_rank": peer_rank,
+                "peer_count": peer_count,
+                "score": round(float(row.get("contribution_score") or 0), 2),
+                "delta": row.get("score_delta"),
+                "volume": metrics.get("Vol. (Cr.)", 0),
+                "profit": metrics.get("Profit (Cr.)", 0),
+                "bounty": metrics.get("BVs (Cr.)", 0),
+                "combat_bonds": metrics.get("CBs (Cr.)", 0),
+                "exploration": metrics.get("Expo. (Cr.)", 0),
+                "missions": metrics.get("M.compl.", 0),
+                "missions_failed": metrics.get("M.failed", 0),
+                "influence_eic": metrics.get("Inf.-EIC", 0),
+                "fines": metrics.get("Fines (Cr.)", 0),
+            })
+        compact_months.append({"month": month.get("month"), "rows": compact_rows})
+    return compact_months
+
+
+def _response_text(response):
+    text_value = getattr(response, "output_text", None)
+    if text_value:
+        return text_value
+    parts = []
+    for item in getattr(response, "output", []) or []:
+        for content in getattr(item, "content", []) or []:
+            text_part = getattr(content, "text", None)
+            if text_part:
+                parts.append(text_part)
+    return "\n".join(parts)
+
+
+def _assessment_debug(response=None, compact_payload=None, text_value=None):
+    debug = {
+        "assessment_version": MONTHLY_ASSESSMENT_VERSION,
+        "model": os.getenv("OPENAI_MODEL", "gpt-5"),
+        "compact_months": len((compact_payload or {}).get("months", [])),
+        "compact_rows": sum(len(m.get("rows", [])) for m in (compact_payload or {}).get("months", [])),
+        "output_text_length": len(text_value or ""),
+    }
+    if response is not None:
+        debug["openai_status"] = getattr(response, "status", None)
+        incomplete = getattr(response, "incomplete_details", None)
+        debug["incomplete_reason"] = getattr(incomplete, "reason", None) if incomplete else None
+        usage = getattr(response, "usage", None)
+        if usage:
+            debug["input_tokens"] = getattr(usage, "input_tokens", None)
+            debug["output_tokens"] = getattr(usage, "output_tokens", None)
+            debug["total_tokens"] = getattr(usage, "total_tokens", None)
+    return debug
+
+
+@app.route("/api/summary/monthly-performance/assessment", methods=["POST"])
+@require_api_key
+def monthly_performance_assessment():
+    payload = request.get_json(silent=True) or {}
+    monthly_data = payload.get("monthly_data")
+    if not isinstance(monthly_data, list):
+        return jsonify({"error": "monthly_data must be a list"}), 400
+
+    fallback = _fallback_monthly_assessment(monthly_data)
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return jsonify({
+            "status": "fallback",
+            "reason": "OPENAI_API_KEY is not configured",
+            "assessment": fallback,
+            "debug": _assessment_debug(),
+        }), 200
+
+    compact_payload = {
+        "tenant": g.tenant.get("name") or g.tenant.get("api_key"),
+        "months": _compact_monthly_data(monthly_data),
+    }
+    instructions = (
+        "You are a BGS performance analyst for an Elite Dangerous dashboard. "
+        "Assess only the supplied last three fully completed months; the current in-progress month is intentionally excluded. "
+        "Write in English and focus on individual Cmdr performance relative to their monthly peers, including peer rank, score, month-over-month delta, and the metrics that explain standout gains or drops. "
+        "Respond only as a JSON object with the keys summary, top_performers, notable_changes, risks_or_gaps, and recommendation. "
+        "Use a readable structure: summary and recommendation should be concise strings; top_performers, notable_changes, and risks_or_gaps should be arrays of short objects with fields such as cmdr, month, peer_rank, score, delta, metrics, and note. "
+        "Name concrete Cmdrs and metrics when the data supports it."
+    )
+
+    try:
+        from openai import OpenAI
+
+        client = OpenAI(api_key=api_key)
+        response = client.responses.create(
+            model=os.getenv("OPENAI_MODEL", "gpt-5"),
+            instructions=instructions,
+            input=json.dumps(compact_payload, ensure_ascii=False),
+            reasoning={"effort": "low"},
+            max_output_tokens=10000,
+        )
+        text_value = _response_text(response)
+        if not text_value:
+            return jsonify({
+                "status": "fallback",
+                "reason": "OpenAI returned no text output",
+                "assessment": fallback,
+                "debug": _assessment_debug(response, compact_payload, text_value),
+            }), 200
+        return jsonify({
+            "status": "openai",
+            "assessment": _parse_assessment_json(text_value),
+            "debug": _assessment_debug(response, compact_payload, text_value),
+        }), 200
+    except Exception as e:
+        logger.exception("Monthly performance OpenAI assessment failed")
+        return jsonify({
+            "status": "fallback",
+            "reason": str(e),
+            "assessment": fallback,
+            "debug": _assessment_debug(compact_payload=compact_payload if "compact_payload" in locals() else None),
+        }), 200
+
+
+@app.route("/api/summary/monthly-performance/debug", methods=["GET"])
+@require_api_key
+def monthly_performance_debug():
+    return jsonify({
+        "assessment_version": MONTHLY_ASSESSMENT_VERSION,
+        "app_file": os.path.abspath(__file__),
+        "openai_model": os.getenv("OPENAI_MODEL", "gpt-5"),
+        "openai_key_configured": bool(os.getenv("OPENAI_API_KEY")),
+        "uses_compact_payload": True,
+        "max_output_tokens": 1600,
+        "reasoning_effort": "low",
+    }), 200
 
 
 @app.route("/api/summary/discord/report", methods=["POST"])

@@ -34,6 +34,11 @@
       "key": "apiversion",
       "value": "1.6.0",
       "type": "string"
+    },
+    {
+      "key": "yourapikeyhere",
+      "value": "yourapikeyhere",
+      "type": "string"
     }
   ],
   "item": [
@@ -66,8 +71,12 @@
             },
             "url": {
               "raw": "{{baseUrl}}/events",
-              "host": ["{{baseUrl}}"],
-              "path": ["events"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "events"
+              ]
             }
           }
         }
@@ -102,8 +111,12 @@
             },
             "url": {
               "raw": "{{baseUrl}}/activities",
-              "host": ["{{baseUrl}}"],
-              "path": ["activities"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "activities"
+              ]
             }
           }
         },
@@ -125,8 +138,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/activities?period=current&cmdr=&system=&faction=",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "activities"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "activities"
+              ],
               "query": [
                 {
                   "key": "period",
@@ -171,8 +189,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/activities/system-summary?period=ct&system=Sol&group=system",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "activities", "system-summary"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "activities",
+                "system-summary"
+              ],
               "query": [
                 {
                   "key": "period",
@@ -197,6 +221,261 @@
       ]
     },
     {
+      "name": "Manual Activity",
+      "item": [
+        {
+          "name": "Submit Manual Activity",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              },
+              {
+                "key": "apikey",
+                "value": "{{yourapikeyhere}}",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"submission_id\": \"discord:123:456:987\",\n  \"source\": \"discord_modal\",\n  \"discord\": {\n    \"guild_id\": \"123\",\n    \"channel_id\": \"456\",\n    \"user_id\": \"789\",\n    \"message_id\": null,\n    \"interaction_id\": \"987\"\n  },\n  \"cmdr\": \"JanJonTeo\",\n  \"client_timestamp\": \"2026-05-27T13:49:00Z\",\n  \"system\": {\n    \"name\": \"Synuefe OX-Y b47-0\",\n    \"address\": 123456789\n  },\n  \"faction\": {\n    \"name\": \"Valkyries of Trade\",\n    \"state\": \"Boom\"\n  },\n  \"activity\": {\n    \"type\": \"bounty_voucher\",\n    \"amount\": 2500000,\n    \"count\": null,\n    \"influence\": null,\n    \"cz_type\": null,\n    \"settlement\": null\n  },\n  \"note\": \"Manual entry from Discord modal\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/manual/activity",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "manual",
+                "activity"
+              ]
+            },
+            "description": "Submit one manual Discord BGS activity. The client must not send tick, tickid, ticktime, or tick_mode; the server resolves the current tick and posts/updates the configured manual activity Discord webhook after the DB transaction."
+          }
+        },
+        {
+          "name": "Undo Last Manual Activity",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              },
+              {
+                "key": "apikey",
+                "value": "{{yourapikeyhere}}",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"source\": \"discord_modal\",\n  \"discord\": {\n    \"guild_id\": \"123\",\n    \"channel_id\": \"456\",\n    \"user_id\": \"789\",\n    \"interaction_id\": \"undo-987\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/manual/activity/undo",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "manual",
+                "activity",
+                "undo"
+              ]
+            },
+            "description": "Marks the last saved manual activity for this Discord user in the current server-resolved tick as deleted, removes its synthetic event rows, reverses activity aggregates, and updates or deletes the Discord webhook message. If the last submission_id ends with :combat_bond, the matching base submission is deleted with it."
+          }
+        },
+        {
+          "name": "Clear Current Tick Manual Activities",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              },
+              {
+                "key": "apikey",
+                "value": "{{yourapikeyhere}}",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"source\": \"discord_modal\",\n  \"discord\": {\n    \"guild_id\": \"123\",\n    \"channel_id\": \"456\",\n    \"user_id\": \"789\",\n    \"interaction_id\": \"clear-ct-987\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/manual/activity/clear-ct",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "manual",
+                "activity",
+                "clear-ct"
+              ]
+            },
+            "description": "Marks all saved manual activities for this Discord user in the current server-resolved tick as deleted, removes their synthetic event rows, reverses activity aggregates, and updates or deletes affected Discord webhook messages."
+          }
+        },
+        {
+          "name": "Manual Lookup Systems",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              },
+              {
+                "key": "apikey",
+                "value": "{{yourapikeyhere}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/manual/lookup/systems?q=syn&limit=25",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "manual",
+                "lookup",
+                "systems"
+              ],
+              "query": [
+                {
+                  "key": "q",
+                  "value": "syn",
+                  "description": "Search text for system autocomplete; short queries return []"
+                },
+                {
+                  "key": "limit",
+                  "value": "25",
+                  "description": "Maximum results; capped at 25"
+                }
+              ]
+            },
+            "description": "Read-only Discord autocomplete lookup. Uses the EDDN snapshot database table eddn_system_info and returns [{name, address}]. Does not return tick data and does not write anything."
+          }
+        },
+        {
+          "name": "Manual Lookup Factions",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              },
+              {
+                "key": "apikey",
+                "value": "{{yourapikeyhere}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/manual/lookup/factions?system=Synuefe%20OX-Y%20b47-0&q=valk&limit=25",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "manual",
+                "lookup",
+                "factions"
+              ],
+              "query": [
+                {
+                  "key": "system",
+                  "value": "Synuefe OX-Y b47-0",
+                  "description": "System name used to scope faction autocomplete; only factions present in this system are returned"
+                },
+                {
+                  "key": "q",
+                  "value": "valk",
+                  "description": "Optional faction-name filter applied only within the selected system"
+                },
+                {
+                  "key": "limit",
+                  "value": "25",
+                  "description": "Maximum results; capped at 25"
+                }
+              ]
+            },
+            "description": "Read-only Discord autocomplete lookup. Uses the EDDN snapshot database table eddn_faction and returns [{name, state}]. The system query parameter is required for useful results; q is optional and filters only the factions present in that system. Does not return tick data and does not write anything."
+          }
+        },
+        {
+          "name": "Manual Lookup Cmdrs",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              },
+              {
+                "key": "apikey",
+                "value": "{{yourapikeyhere}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/manual/lookup/cmdrs?q=jan&limit=25",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "manual",
+                "lookup",
+                "cmdrs"
+              ],
+              "query": [
+                {
+                  "key": "q",
+                  "value": "jan",
+                  "description": "Search text for commander autocomplete"
+                },
+                {
+                  "key": "limit",
+                  "value": "25",
+                  "description": "Maximum results; capped at 25"
+                }
+              ]
+            },
+            "description": "Read-only Discord autocomplete lookup. Returns [{name}] from Cmdr, event, and activity tenant data. Does not return Discord IDs, tick data, or secrets, and does not write anything."
+          }
+        }
+      ]
+    },
+    {
       "name": "Summary APIs",
       "item": [
         {
@@ -212,8 +491,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/summary/market-events?period=cm&system_name=",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "summary", "market-events"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "summary",
+                "market-events"
+              ],
               "query": [
                 {
                   "key": "period",
@@ -242,8 +527,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/summary/missions-completed?period=cm&system_name=",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "summary", "missions-completed"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "summary",
+                "missions-completed"
+              ],
               "query": [
                 {
                   "key": "period",
@@ -272,8 +563,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/summary/missions-failed?period=cm&system_name=",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "summary", "missions-failed"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "summary",
+                "missions-failed"
+              ],
               "query": [
                 {
                   "key": "period",
@@ -302,8 +599,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/summary/bounty-vouchers?period=cm&system_name=",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "summary", "bounty-vouchers"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "summary",
+                "bounty-vouchers"
+              ],
               "query": [
                 {
                   "key": "period",
@@ -332,8 +635,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/summary/combat-bonds?period=cm&system_name=",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "summary", "combat-bonds"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "summary",
+                "combat-bonds"
+              ],
               "query": [
                 {
                   "key": "period",
@@ -362,8 +671,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/summary/influence-by-faction?period=cm&system_name=",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "summary", "influence-by-faction"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "summary",
+                "influence-by-faction"
+              ],
               "query": [
                 {
                   "key": "period",
@@ -392,8 +707,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/summary/influence-eic?period=cm&system_name=",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "summary", "influence-eic"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "summary",
+                "influence-eic"
+              ],
               "query": [
                 {
                   "key": "period",
@@ -422,8 +743,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/summary/exploration-sales?period=cm&system_name=",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "summary", "exploration-sales"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "summary",
+                "exploration-sales"
+              ],
               "query": [
                 {
                   "key": "period",
@@ -452,8 +779,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/summary/bounty-fines?period=cm&system_name=",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "summary", "bounty-fines"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "summary",
+                "bounty-fines"
+              ],
               "query": [
                 {
                   "key": "period",
@@ -482,8 +815,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/bounty-vouchers?cmdr=&system=&tickid=&type=bounty&faction=&squadron_rank=&period=cm",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "bounty-vouchers"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "bounty-vouchers"
+              ],
               "query": [
                 {
                   "key": "cmdr",
@@ -537,8 +875,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/syntheticcz-summary?period=cm&system_name=",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "syntheticcz-summary"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "syntheticcz-summary"
+              ],
               "query": [
                 {
                   "key": "period",
@@ -567,8 +910,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/syntheticgroundcz-summary?period=cm&system_name=",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "syntheticgroundcz-summary"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "syntheticgroundcz-summary"
+              ],
               "query": [
                 {
                   "key": "period",
@@ -597,8 +945,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/fsdjump-factions",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "fsdjump-factions"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "fsdjump-factions"
+              ]
             }
           }
         },
@@ -615,8 +968,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/system-summary?faction=Federal%20Navy&controlling_faction=Federal%20Navy&controlling_power=Zemina%20Torval&power=Zemina%20Torval&state=Expansion&recovering_state=War&pending_state=Election&has_conflict=true&population=1000000-2000000&powerplay_state=Expansion&cf_in_conflict=true",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "system-summary"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "system-summary"
+              ],
               "query": [
                 {
                   "key": "faction",
@@ -696,8 +1054,15 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/summary/top5/market-events?period=cm&system_name=",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "summary", "top5", "market-events"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "summary",
+                "top5",
+                "market-events"
+              ],
               "query": [
                 {
                   "key": "period",
@@ -726,8 +1091,15 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/summary/top5/missions-completed?period=cm&system_name=",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "summary", "top5", "missions-completed"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "summary",
+                "top5",
+                "missions-completed"
+              ],
               "query": [
                 {
                   "key": "period",
@@ -756,8 +1128,15 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/summary/top5/bounty-vouchers?period=cm&system_name=",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "summary", "top5", "bounty-vouchers"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "summary",
+                "top5",
+                "bounty-vouchers"
+              ],
               "query": [
                 {
                   "key": "period",
@@ -786,8 +1165,15 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/summary/top5/combat-bonds?period=cm&system_name=",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "summary", "top5", "combat-bonds"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "summary",
+                "top5",
+                "combat-bonds"
+              ],
               "query": [
                 {
                   "key": "period",
@@ -816,8 +1202,15 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/summary/top5/influence-eic?period=cm&system_name=",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "summary", "top5", "influence-eic"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "summary",
+                "top5",
+                "influence-eic"
+              ],
               "query": [
                 {
                   "key": "period",
@@ -846,8 +1239,15 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/summary/top5/exploration-sales?period=cm&system_name=",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "summary", "top5", "exploration-sales"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "summary",
+                "top5",
+                "exploration-sales"
+              ],
               "query": [
                 {
                   "key": "period",
@@ -881,8 +1281,15 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/summary/discord/top5all",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "summary", "discord", "top5all"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "summary",
+                "discord",
+                "top5all"
+              ]
             }
           }
         },
@@ -899,8 +1306,15 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/summary/discord/tick",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "summary", "discord", "tick"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "summary",
+                "discord",
+                "tick"
+              ]
             }
           }
         },
@@ -917,8 +1331,15 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/summary/discord/syntheticcz?period=cm",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "summary", "discord", "syntheticcz"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "summary",
+                "discord",
+                "syntheticcz"
+              ],
               "query": [
                 {
                   "key": "period",
@@ -942,8 +1363,15 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/summary/discord/syntheticgroundcz?period=cm",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "summary", "discord", "syntheticgroundcz"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "summary",
+                "discord",
+                "syntheticgroundcz"
+              ],
               "query": [
                 {
                   "key": "period",
@@ -953,6 +1381,77 @@
               ]
             }
           }
+        },
+        {
+          "name": "Monthly Performance Assessment (Debug)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "apiversion",
+                "value": "{{apiversion}}",
+                "type": "text"
+              },
+              {
+                "key": "apikey",
+                "value": "{{yourapikeyhere}}",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"monthly_data\": [\n    {\n      \"month\": \"2026-05\",\n      \"rows\": [\n        {\n          \"cmdr\": \"DebugTest\",\n          \"rank\": \"Pilot\",\n          \"contribution_score\": 120,\n          \"score_delta\": 15,\n          \"metrics\": {\n            \"Vol. (Cr.)\": 1000,\n            \"Profit (Cr.)\": 0,\n            \"BVs (Cr.)\": 50,\n            \"CBs (Cr.)\": 25,\n            \"Expo. (Cr.)\": 75,\n            \"M.compl.\": 0,\n            \"M.failed\": 0,\n            \"Inf.-EIC\": 5,\n            \"Fines (Cr.)\": 0\n          }\n        }\n      ]\n    }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/summary/monthly-performance/assessment",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "summary",
+                "monthly-performance",
+                "assessment"
+              ]
+            }
+          },
+          "description": "Debug endpoint for Monthly Performance KI assessment. Expected response includes status, assessment, and debug.assessment_version. If debug is missing, the deployed backend is not running the current implementation."
+        },
+        {
+          "name": "Monthly Performance Version Debug",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apiversion",
+                "value": "{{apiversion}}",
+                "type": "text"
+              },
+              {
+                "key": "apikey",
+                "value": "{{yourapikeyhere}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/summary/monthly-performance/debug",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "summary",
+                "monthly-performance",
+                "debug"
+              ]
+            }
+          },
+          "description": "No-cost version/debug endpoint. Use this first after deployment. Expected assessment_version: 2026-05-07-v2-compact-openai-response-parser."
         }
       ]
     },
@@ -972,8 +1471,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/table/event",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "table", "event"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "table",
+                "event"
+              ]
             }
           }
         },
@@ -990,8 +1495,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/table/market_buy_event",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "table", "market_buy_event"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "table",
+                "market_buy_event"
+              ]
             }
           }
         },
@@ -1008,8 +1519,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/table/activity",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "table", "activity"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "table",
+                "activity"
+              ]
             }
           }
         },
@@ -1026,8 +1543,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/table/cmdr",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "table", "cmdr"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "table",
+                "cmdr"
+              ]
             }
           }
         },
@@ -1044,8 +1567,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/table/objective",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "table", "objective"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "table",
+                "objective"
+              ]
             }
           }
         },
@@ -1062,8 +1591,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/table/objective_target",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "table", "objective_target"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "table",
+                "objective_target"
+              ]
             }
           }
         },
@@ -1080,8 +1615,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/table/objective_target_settlement",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "table", "objective_target_settlement"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "table",
+                "objective_target_settlement"
+              ]
             }
           }
         }
@@ -1103,8 +1644,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/summary/leaderboard?period=cm&system_name=",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "summary", "leaderboard"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "summary",
+                "leaderboard"
+              ],
               "query": [
                 {
                   "key": "period",
@@ -1133,8 +1680,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/summary/recruits",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "summary", "recruits"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "summary",
+                "recruits"
+              ]
             }
           }
         }
@@ -1164,8 +1717,13 @@
             },
             "url": {
               "raw": "{{baseUrl}}/api/objectives",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "objectives"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "objectives"
+              ]
             }
           }
         },
@@ -1182,8 +1740,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/objectives",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "objectives"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "objectives"
+              ]
             }
           }
         },
@@ -1200,8 +1763,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/objectives?system=Sol",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "objectives"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "objectives"
+              ],
               "query": [
                 {
                   "key": "system",
@@ -1224,8 +1792,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/objectives?faction=Federal Navy",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "objectives"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "objectives"
+              ],
               "query": [
                 {
                   "key": "faction",
@@ -1248,8 +1821,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/objectives?active=true",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "objectives"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "objectives"
+              ],
               "query": [
                 {
                   "key": "active",
@@ -1273,8 +1851,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/objectives/1",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "objectives", "1"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "objectives",
+                "1"
+              ]
             }
           }
         },
@@ -1291,8 +1875,12 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/objectives",
-              "host": ["{{baseUrl}}"],
-              "path": ["objectives"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "objectives"
+              ]
             }
           }
         },
@@ -1317,8 +1905,12 @@
             },
             "url": {
               "raw": "{{baseUrl}}/objectives",
-              "host": ["{{baseUrl}}"],
-              "path": ["objectives"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "objectives"
+              ]
             }
           }
         },
@@ -1335,8 +1927,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/objectives/1",
-              "host": ["{{baseUrl}}"],
-              "path": ["objectives", "1"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "objectives",
+                "1"
+              ]
             }
           }
         }
@@ -1371,8 +1968,13 @@
             },
             "url": {
               "raw": "{{baseUrl}}/api/login",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "login"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "login"
+              ]
             }
           }
         }
@@ -1394,8 +1996,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/debug/tick-change",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "debug", "tick-change"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "debug",
+                "tick-change"
+              ]
             }
           }
         },
@@ -1412,8 +2020,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/sync/cmdrs",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "sync", "cmdrs"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "sync",
+                "cmdrs"
+              ]
             }
           }
         }
@@ -1428,8 +2042,12 @@
             "method": "GET",
             "url": {
               "raw": "{{baseUrl}}/",
-              "host": ["{{baseUrl}}"],
-              "path": [""]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                ""
+              ]
             }
           },
           "description": "Basic server info (app root) - in app.py implemented as GET /"
@@ -1440,8 +2058,12 @@
             "method": "GET",
             "url": {
               "raw": "{{baseUrl}}/discovery",
-              "host": ["{{baseUrl}}"],
-              "path": ["discovery"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "discovery"
+              ]
             }
           }
         }
@@ -1463,8 +2085,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/protected-faction",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "protected-faction"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "protected-faction"
+              ]
             }
           }
         },
@@ -1481,8 +2108,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/protected-faction/1",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "protected-faction", "1"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "protected-faction",
+                "1"
+              ]
             }
           }
         },
@@ -1507,8 +2140,13 @@
             },
             "url": {
               "raw": "{{baseUrl}}/api/protected-faction",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "protected-faction"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "protected-faction"
+              ]
             }
           }
         },
@@ -1533,8 +2171,14 @@
             },
             "url": {
               "raw": "{{baseUrl}}/api/protected-faction/1",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "protected-faction", "1"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "protected-faction",
+                "1"
+              ]
             }
           }
         },
@@ -1551,8 +2195,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/protected-faction/1",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "protected-faction", "1"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "protected-faction",
+                "1"
+              ]
             }
           }
         },
@@ -1569,8 +2219,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/protected-faction/systems",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "protected-faction", "systems"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "protected-faction",
+                "systems"
+              ]
             }
           }
         }
@@ -1597,8 +2253,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/lists/systems?q=Sol&limit=20",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "lists", "systems"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "lists",
+                "systems"
+              ],
               "query": [
                 {
                   "key": "q",
@@ -1628,8 +2290,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/lists/controlling-factions",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "lists", "controlling-factions"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "lists",
+                "controlling-factions"
+              ]
             },
             "description": "Returns a list of unique controlling factions from eddn_system_info."
           }
@@ -1647,8 +2315,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/lists/controlling-powers",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "lists", "controlling-powers"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "lists",
+                "controlling-powers"
+              ]
             },
             "description": "Returns a list of unique controlling powers from eddn_system_info."
           }
@@ -1666,8 +2340,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/lists/factions",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "lists", "factions"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "lists",
+                "factions"
+              ]
             },
             "description": "Returns a list of unique factions from eddn_faction."
           }
@@ -1682,22 +2362,68 @@
           "request": {
             "method": "GET",
             "header": [
-              { "key": "apiversion", "value": "1.6.0", "type": "text" }
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
             ],
             "url": {
               "raw": "{{baseUrl}}/api/mining/points?type=Painite,Tritium&min_count=0&min_sightings=1&max_age_days=365&half_life_days=45&w_count=1.0&w_sightings=1.0&w_recency=0.5&limit=100",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "mining", "points"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "mining",
+                "points"
+              ],
               "query": [
-                { "key": "type", "value": "Painite,Tritium", "description": "Signal-Typen (optional, CSV)" },
-                { "key": "min_count", "value": "0", "description": "Mindestanzahl (optional)" },
-                { "key": "min_sightings", "value": "1", "description": "Mindest-Sichtungen (optional)" },
-                { "key": "max_age_days", "value": "365", "description": "Max. Alter in Tagen (optional)" },
-                { "key": "half_life_days", "value": "45", "description": "Halbwertszeit für Score (optional)" },
-                { "key": "w_count", "value": "1.0", "description": "Gewichtung Count (optional)" },
-                { "key": "w_sightings", "value": "1.0", "description": "Gewichtung Sightings (optional)" },
-                { "key": "w_recency", "value": "0.5", "description": "Gewichtung Recency (optional)" },
-                { "key": "limit", "value": "100", "description": "Limit (optional)" }
+                {
+                  "key": "type",
+                  "value": "Painite,Tritium",
+                  "description": "Signal-Typen (optional, CSV)"
+                },
+                {
+                  "key": "min_count",
+                  "value": "0",
+                  "description": "Mindestanzahl (optional)"
+                },
+                {
+                  "key": "min_sightings",
+                  "value": "1",
+                  "description": "Mindest-Sichtungen (optional)"
+                },
+                {
+                  "key": "max_age_days",
+                  "value": "365",
+                  "description": "Max. Alter in Tagen (optional)"
+                },
+                {
+                  "key": "half_life_days",
+                  "value": "45",
+                  "description": "Halbwertszeit für Score (optional)"
+                },
+                {
+                  "key": "w_count",
+                  "value": "1.0",
+                  "description": "Gewichtung Count (optional)"
+                },
+                {
+                  "key": "w_sightings",
+                  "value": "1.0",
+                  "description": "Gewichtung Sightings (optional)"
+                },
+                {
+                  "key": "w_recency",
+                  "value": "0.5",
+                  "description": "Gewichtung Recency (optional)"
+                },
+                {
+                  "key": "limit",
+                  "value": "100",
+                  "description": "Limit (optional)"
+                }
               ]
             }
           }
@@ -1707,17 +2433,44 @@
           "request": {
             "method": "GET",
             "header": [
-              { "key": "apiversion", "value": "1.6.0", "type": "text" }
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
             ],
             "url": {
               "raw": "{{baseUrl}}/api/mining/points/near?ref_system=Sol&radius_ly=50&type=Painite&coords_source=auto",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "mining", "points", "near"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "mining",
+                "points",
+                "near"
+              ],
               "query": [
-                { "key": "ref_system", "value": "Sol", "description": "Referenzsystem (Pflicht)" },
-                { "key": "radius_ly", "value": "50", "description": "Radius in Lichtjahren" },
-                { "key": "type", "value": "Painite", "description": "Signal-Typen (optional, CSV)" },
-                { "key": "coords_source", "value": "auto", "description": "Koordinatenquelle (auto|local|ardent|edsm)" }
+                {
+                  "key": "ref_system",
+                  "value": "Sol",
+                  "description": "Referenzsystem (Pflicht)"
+                },
+                {
+                  "key": "radius_ly",
+                  "value": "50",
+                  "description": "Radius in Lichtjahren"
+                },
+                {
+                  "key": "type",
+                  "value": "Painite",
+                  "description": "Signal-Typen (optional, CSV)"
+                },
+                {
+                  "key": "coords_source",
+                  "value": "auto",
+                  "description": "Koordinatenquelle (auto|local|ardent|edsm)"
+                }
               ]
             }
           }
@@ -1727,22 +2480,68 @@
           "request": {
             "method": "GET",
             "header": [
-              { "key": "apiversion", "value": "1.6.0", "type": "text" }
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
             ],
             "url": {
               "raw": "{{baseUrl}}/api/mining/hotspots?type=Painite&min_count=0&min_sightings=1&max_age_days=365&half_life_days=45&w_count=1.0&w_sightings=1.0&w_recency=0.5&limit=100",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "mining", "hotspots"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "mining",
+                "hotspots"
+              ],
               "query": [
-                { "key": "type", "value": "Painite", "description": "Commodity-Typen (optional, CSV)" },
-                { "key": "min_count", "value": "0", "description": "Mindestanzahl (optional)" },
-                { "key": "min_sightings", "value": "1", "description": "Mindest-Sichtungen (optional)" },
-                { "key": "max_age_days", "value": "365", "description": "Max. Alter in Tagen (optional)" },
-                { "key": "half_life_days", "value": "45", "description": "Halbwertszeit für Score (optional)" },
-                { "key": "w_count", "value": "1.0", "description": "Gewichtung Count (optional)" },
-                { "key": "w_sightings", "value": "1.0", "description": "Gewichtung Sightings (optional)" },
-                { "key": "w_recency", "value": "0.5", "description": "Gewichtung Recency (optional)" },
-                { "key": "limit", "value": "100", "description": "Limit (optional)" }
+                {
+                  "key": "type",
+                  "value": "Painite",
+                  "description": "Commodity-Typen (optional, CSV)"
+                },
+                {
+                  "key": "min_count",
+                  "value": "0",
+                  "description": "Mindestanzahl (optional)"
+                },
+                {
+                  "key": "min_sightings",
+                  "value": "1",
+                  "description": "Mindest-Sichtungen (optional)"
+                },
+                {
+                  "key": "max_age_days",
+                  "value": "365",
+                  "description": "Max. Alter in Tagen (optional)"
+                },
+                {
+                  "key": "half_life_days",
+                  "value": "45",
+                  "description": "Halbwertszeit für Score (optional)"
+                },
+                {
+                  "key": "w_count",
+                  "value": "1.0",
+                  "description": "Gewichtung Count (optional)"
+                },
+                {
+                  "key": "w_sightings",
+                  "value": "1.0",
+                  "description": "Gewichtung Sightings (optional)"
+                },
+                {
+                  "key": "w_recency",
+                  "value": "0.5",
+                  "description": "Gewichtung Recency (optional)"
+                },
+                {
+                  "key": "limit",
+                  "value": "100",
+                  "description": "Limit (optional)"
+                }
               ]
             }
           }
@@ -1752,17 +2551,44 @@
           "request": {
             "method": "GET",
             "header": [
-              { "key": "apiversion", "value": "1.6.0", "type": "text" }
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
             ],
             "url": {
               "raw": "{{baseUrl}}/api/mining/hotspots/near?ref_system=Sol&radius_ly=50&type=Painite&coords_source=auto",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "mining", "hotspots", "near"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "mining",
+                "hotspots",
+                "near"
+              ],
               "query": [
-                { "key": "ref_system", "value": "Sol", "description": "Referenzsystem (Pflicht)" },
-                { "key": "radius_ly", "value": "50", "description": "Radius in Lichtjahren" },
-                { "key": "type", "value": "Painite", "description": "Commodity-Typen (optional, CSV)" },
-                { "key": "coords_source", "value": "auto", "description": "Koordinatenquelle (auto|local|ardent|edsm)" }
+                {
+                  "key": "ref_system",
+                  "value": "Sol",
+                  "description": "Referenzsystem (Pflicht)"
+                },
+                {
+                  "key": "radius_ly",
+                  "value": "50",
+                  "description": "Radius in Lichtjahren"
+                },
+                {
+                  "key": "type",
+                  "value": "Painite",
+                  "description": "Commodity-Typen (optional, CSV)"
+                },
+                {
+                  "key": "coords_source",
+                  "value": "auto",
+                  "description": "Koordinatenquelle (auto|local|ardent|edsm)"
+                }
               ]
             }
           }
@@ -1772,23 +2598,73 @@
           "request": {
             "method": "GET",
             "header": [
-              { "key": "apiversion", "value": "1.6.0", "type": "text" }
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
             ],
             "url": {
               "raw": "{{baseUrl}}/api/mining/exo?genus=Tussocks,Fungoid&type=type1&type=type2&min_count=0&min_sightings=1&max_age_days=365&half_life_days=45&w_count=1.0&w_sightings=1.0&w_recency=0.5&limit=100",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "mining", "exo"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "mining",
+                "exo"
+              ],
               "query": [
-                { "key": "genus", "value": "Tussocks,Fungoid", "description": "Genus (optional, CSV)" },
-                { "key": "type", "value": "type1,type2", "description": "Signal-Typen (optional, CSV)" },
-                { "key": "min_count", "value": "0", "description": "Mindestanzahl (optional)" },
-                { "key": "min_sightings", "value": "1", "description": "Mindest-Sichtungen (optional)" },
-                { "key": "max_age_days", "value": "365", "description": "Max. Alter in Tagen (optional)" },
-                { "key": "half_life_days", "value": "45", "description": "Halbwertszeit für Score (optional)" },
-                { "key": "w_count", "value": "1.0", "description": "Gewichtung Count (optional)" },
-                { "key": "w_sightings", "value": "1.0", "description": "Gewichtung Sightings (optional)" },
-                { "key": "w_recency", "value": "0.5", "description": "Gewichtung Recency (optional)" },
-                { "key": "limit", "value": "100", "description": "Limit (optional)" }
+                {
+                  "key": "genus",
+                  "value": "Tussocks,Fungoid",
+                  "description": "Genus (optional, CSV)"
+                },
+                {
+                  "key": "type",
+                  "value": "type1,type2",
+                  "description": "Signal-Typen (optional, CSV)"
+                },
+                {
+                  "key": "min_count",
+                  "value": "0",
+                  "description": "Mindestanzahl (optional)"
+                },
+                {
+                  "key": "min_sightings",
+                  "value": "1",
+                  "description": "Mindest-Sichtungen (optional)"
+                },
+                {
+                  "key": "max_age_days",
+                  "value": "365",
+                  "description": "Max. Alter in Tagen (optional)"
+                },
+                {
+                  "key": "half_life_days",
+                  "value": "45",
+                  "description": "Halbwertszeit für Score (optional)"
+                },
+                {
+                  "key": "w_count",
+                  "value": "1.0",
+                  "description": "Gewichtung Count (optional)"
+                },
+                {
+                  "key": "w_sightings",
+                  "value": "1.0",
+                  "description": "Gewichtung Sightings (optional)"
+                },
+                {
+                  "key": "w_recency",
+                  "value": "0.5",
+                  "description": "Gewichtung Recency (optional)"
+                },
+                {
+                  "key": "limit",
+                  "value": "100",
+                  "description": "Limit (optional)"
+                }
               ]
             }
           }
@@ -1798,18 +2674,49 @@
           "request": {
             "method": "GET",
             "header": [
-              { "key": "apiversion", "value": "1.6.0", "type": "text" }
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
             ],
             "url": {
               "raw": "{{baseUrl}}/api/mining/exo/near?ref_system=Sol&radius_ly=50&genus=Tussocks&type=type1&type=type2&coords_source=auto",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "mining", "exo", "near"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "mining",
+                "exo",
+                "near"
+              ],
               "query": [
-                { "key": "ref_system", "value": "Sol", "description": "Referenzsystem (Pflicht)" },
-                { "key": "radius_ly", "value": "50", "description": "Radius in Lichtjahren" },
-                { "key": "genus", "value": "Tussocks", "description": "Genus (optional, CSV)" },
-                { "key": "type", "value": "type1,type2", "description": "Signal-Typen (optional, CSV)" },
-                { "key": "coords_source", "value": "auto", "description": "Koordinatenquelle (auto|local|ardent|edsm)" }
+                {
+                  "key": "ref_system",
+                  "value": "Sol",
+                  "description": "Referenzsystem (Pflicht)"
+                },
+                {
+                  "key": "radius_ly",
+                  "value": "50",
+                  "description": "Radius in Lichtjahren"
+                },
+                {
+                  "key": "genus",
+                  "value": "Tussocks",
+                  "description": "Genus (optional, CSV)"
+                },
+                {
+                  "key": "type",
+                  "value": "type1,type2",
+                  "description": "Signal-Typen (optional, CSV)"
+                },
+                {
+                  "key": "coords_source",
+                  "value": "auto",
+                  "description": "Koordinatenquelle (auto|local|ardent|edsm)"
+                }
               ]
             }
           }
@@ -1819,12 +2726,22 @@
           "request": {
             "method": "POST",
             "header": [
-              { "key": "apiversion", "value": "1.6.0", "type": "text" }
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              }
             ],
             "url": {
               "raw": "{{baseUrl}}/api/mining/fetch-system-coords?source=auto",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "mining", "fetch-system-coords"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "mining",
+                "fetch-system-coords"
+              ],
               "query": [
                 {
                   "key": "source",
@@ -1849,8 +2766,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/api/sysmap/Sol?w=1280&full=1",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "sysmap", "Sol"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "sysmap",
+                "Sol"
+              ],
               "query": [
                 {
                   "key": "w",
@@ -1877,22 +2800,69 @@
           "request": {
             "method": "GET",
             "header": [
-              { "key": "apiversion", "value": "1.6.0", "type": "text" },
-              { "key": "apikey", "value": "{{yourapikeyhere}}", "type": "text" }
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              },
+              {
+                "key": "apikey",
+                "value": "{{yourapikeyhere}}",
+                "type": "text"
+              }
             ],
             "url": {
               "raw": "{{baseUrl}}/api/bgs/v3/bucket?period=all&tickid=&ticktime=&systemaddress=&system=&faction=&include_cmdr=true&clamp=true",
-              "host": ["{{baseUrl}}"],
-              "path": ["api","bgs","v3","bucket"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "bgs",
+                "v3",
+                "bucket"
+              ],
               "query": [
-                {"key":"period","value":"all","description":"cw|lw|cm|lm|2m|y|cd|ld|ct|lt|all"},
-                {"key":"tickid","value":"","description":"optional tickid"},
-                {"key":"ticktime","value":"","description":"optional ticktime (ISO8601)"},
-                {"key":"systemaddress","value":"","description":"optional system address"},
-                {"key":"system","value":"","description":"optional system name"},
-                {"key":"faction","value":"","description":"optional faction filter"},
-                {"key":"include_cmdr","value":"true","description":"include per-cmdr breakdown: true/false"},
-                {"key":"clamp","value":"true","description":"clamp negative points: true/false"}
+                {
+                  "key": "period",
+                  "value": "all",
+                  "description": "cw|lw|cm|lm|2m|y|cd|ld|ct|lt|all"
+                },
+                {
+                  "key": "tickid",
+                  "value": "",
+                  "description": "optional tickid"
+                },
+                {
+                  "key": "ticktime",
+                  "value": "",
+                  "description": "optional ticktime (ISO8601)"
+                },
+                {
+                  "key": "systemaddress",
+                  "value": "",
+                  "description": "optional system address"
+                },
+                {
+                  "key": "system",
+                  "value": "",
+                  "description": "optional system name"
+                },
+                {
+                  "key": "faction",
+                  "value": "",
+                  "description": "optional faction filter"
+                },
+                {
+                  "key": "include_cmdr",
+                  "value": "true",
+                  "description": "include per-cmdr breakdown: true/false"
+                },
+                {
+                  "key": "clamp",
+                  "value": "true",
+                  "description": "clamp negative points: true/false"
+                }
               ]
             }
           },
@@ -1903,24 +2873,79 @@
           "request": {
             "method": "POST",
             "header": [
-              { "key": "apiversion", "value": "1.6.0", "type": "text" },
-              { "key": "apikey", "value": "{{yourapikeyhere}}", "type": "text" },
-              { "key": "Content-Type", "value": "application/x-www-form-urlencoded" }
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              },
+              {
+                "key": "apikey",
+                "value": "{{yourapikeyhere}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/x-www-form-urlencoded"
+              }
             ],
             "body": {
               "mode": "urlencoded",
               "urlencoded": [
-                {"key":"period","value":"all","type":"text"},
-                {"key":"tickid","value":"","type":"text"},
-                {"key":"ticktime","value":"","type":"text"},
-                {"key":"systemaddress","value":"","type":"text"},
-                {"key":"system","value":"","type":"text"},
-                {"key":"faction","value":"","type":"text"},
-                {"key":"include_cmdr","value":"true","type":"text"},
-                {"key":"clamp","value":"true","type":"text"}
+                {
+                  "key": "period",
+                  "value": "all",
+                  "type": "text"
+                },
+                {
+                  "key": "tickid",
+                  "value": "",
+                  "type": "text"
+                },
+                {
+                  "key": "ticktime",
+                  "value": "",
+                  "type": "text"
+                },
+                {
+                  "key": "systemaddress",
+                  "value": "",
+                  "type": "text"
+                },
+                {
+                  "key": "system",
+                  "value": "",
+                  "type": "text"
+                },
+                {
+                  "key": "faction",
+                  "value": "",
+                  "type": "text"
+                },
+                {
+                  "key": "include_cmdr",
+                  "value": "true",
+                  "type": "text"
+                },
+                {
+                  "key": "clamp",
+                  "value": "true",
+                  "type": "text"
+                }
               ]
             },
-            "url": { "raw": "{{baseUrl}}/api/bgs/v3/bucket/discord", "host":["{{baseUrl}}"], "path":["api","bgs","v3","bucket","discord"] }
+            "url": {
+              "raw": "{{baseUrl}}/api/bgs/v3/bucket/discord",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "bgs",
+                "v3",
+                "bucket",
+                "discord"
+              ]
+            }
           },
           "description": "Trigger Discord dispatch for combined bucket (POST with form-encoded parameters). Requires apikey header."
         },
@@ -1929,23 +2954,75 @@
           "request": {
             "method": "GET",
             "header": [
-              { "key": "apiversion", "value": "1.6.0", "type": "text" },
-              { "key": "apikey", "value": "{{yourapikeyhere}}", "type": "text" }
+              {
+                "key": "apiversion",
+                "value": "1.6.0",
+                "type": "text"
+              },
+              {
+                "key": "apikey",
+                "value": "{{yourapikeyhere}}",
+                "type": "text"
+              }
             ],
             "url": {
               "raw": "{{baseUrl}}/api/bgs/v3/bucket/chart?period=all&tickid=&ticktime=&systemaddress=&system=&faction=&include_cmdr=true&clamp=true&format=png",
-              "host": ["{{baseUrl}}"],
-              "path": ["api","bgs","v3","bucket","chart"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "bgs",
+                "v3",
+                "bucket",
+                "chart"
+              ],
               "query": [
-                {"key":"period","value":"all","description":"cw|lw|cm|lm|2m|y|cd|ld|ct|lt|all"},
-                {"key":"tickid","value":"","description":"optional tickid"},
-                {"key":"ticktime","value":"","description":"optional ticktime (ISO8601)"},
-                {"key":"systemaddress","value":"","description":"optional system address"},
-                {"key":"system","value":"","description":"optional system name"},
-                {"key":"faction","value":"","description":"optional faction filter"},
-                {"key":"include_cmdr","value":"true","description":"include per-cmdr breakdown: true/false"},
-                {"key":"clamp","value":"true","description":"clamp negative points: true/false"},
-                {"key":"format","value":"png","description":"optional chart format: png|svg|json"}
+                {
+                  "key": "period",
+                  "value": "all",
+                  "description": "cw|lw|cm|lm|2m|y|cd|ld|ct|lt|all"
+                },
+                {
+                  "key": "tickid",
+                  "value": "",
+                  "description": "optional tickid"
+                },
+                {
+                  "key": "ticktime",
+                  "value": "",
+                  "description": "optional ticktime (ISO8601)"
+                },
+                {
+                  "key": "systemaddress",
+                  "value": "",
+                  "description": "optional system address"
+                },
+                {
+                  "key": "system",
+                  "value": "",
+                  "description": "optional system name"
+                },
+                {
+                  "key": "faction",
+                  "value": "",
+                  "description": "optional faction filter"
+                },
+                {
+                  "key": "include_cmdr",
+                  "value": "true",
+                  "description": "include per-cmdr breakdown: true/false"
+                },
+                {
+                  "key": "clamp",
+                  "value": "true",
+                  "description": "clamp negative points: true/false"
+                },
+                {
+                  "key": "format",
+                  "value": "png",
+                  "description": "optional chart format: png|svg|json"
+                }
               ]
             }
           },

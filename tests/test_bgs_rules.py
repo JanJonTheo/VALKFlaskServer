@@ -1116,7 +1116,7 @@ class RuleApiPermissionTest(unittest.TestCase):
         self.assertEqual(renamed.get_json()["states_paused"], 1)
         self.assertEqual(renamed.get_json()["alerts_resolved"], 1)
 
-    def test_admin_protected_faction_candidates_use_eddn_prefix_search(self):
+    def test_admin_protected_faction_candidates_use_eddn_partial_search(self):
         with tempfile.TemporaryDirectory() as temp_directory:
             database_path = Path(temp_directory) / "eddn.sqlite"
             engine = create_engine(f"sqlite:///{database_path.as_posix()}")
@@ -1128,7 +1128,8 @@ class RuleApiPermissionTest(unittest.TestCase):
                     text(
                         "INSERT INTO eddn_faction(name, system_name) VALUES "
                         "('Aegis Shield', 'One'), ('Aegis Vanguard', 'Two'), "
-                        "('Beacon Guard', 'Three')"
+                        "('Beacon Guard', 'Three'), "
+                        "('East India Company', 'Four')"
                     )
                 )
             engine.dispose()
@@ -1140,10 +1141,28 @@ class RuleApiPermissionTest(unittest.TestCase):
                     "/api/admin/protected-factions/candidates?q=Ae",
                     headers={"authorization": "Bearer admin"},
                 )
+                infix_response = self.client.get(
+                    "/api/admin/protected-factions/candidates?q=Shield",
+                    headers={"authorization": "Bearer admin"},
+                )
+                east_response = self.client.get(
+                    "/api/admin/protected-factions/candidates?q=Eas",
+                    headers={"authorization": "Bearer admin"},
+                )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
             [item["name"] for item in response.get_json()["data"]],
             ["Aegis Shield", "Aegis Vanguard"],
+        )
+        self.assertEqual(infix_response.status_code, 200)
+        self.assertEqual(
+            [item["name"] for item in infix_response.get_json()["data"]],
+            ["Aegis Shield"],
+        )
+        self.assertEqual(east_response.status_code, 200)
+        self.assertEqual(
+            [item["name"] for item in east_response.get_json()["data"]],
+            ["East India Company"],
         )
 
 

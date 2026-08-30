@@ -1636,12 +1636,17 @@ def register_bgs_rule_routes(app, db, require_api_key, commit_with_retry, logger
             with engine.connect() as connection:
                 rows = connection.execute(
                     text(
-                        "SELECT DISTINCT name FROM eddn_faction "
+                        "SELECT trim(name) AS name FROM eddn_faction "
                         "WHERE name IS NOT NULL AND trim(name) != '' "
-                        "AND name LIKE :query ESCAPE '\\' "
-                        "ORDER BY name COLLATE NOCASE LIMIT 20"
+                        "AND name LIKE :contains ESCAPE '\\' "
+                        "GROUP BY trim(name) COLLATE NOCASE "
+                        "ORDER BY CASE WHEN name LIKE :prefix ESCAPE '\\' "
+                        "THEN 0 ELSE 1 END, name COLLATE NOCASE LIMIT 20"
                     ),
-                    {"query": f"{escaped}%"},
+                    {
+                        "contains": f"%{escaped}%",
+                        "prefix": f"{escaped}%",
+                    },
                 ).all()
         except Exception as exc:
             logger.warning("Protected faction candidate search failed: %s", exc)

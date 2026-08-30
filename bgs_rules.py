@@ -17,10 +17,12 @@ from cryptography.fernet import Fernet, InvalidToken
 from flask import g, jsonify, request
 import requests
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import IntegrityError
 
 from dashboard_users import (
     ROLE_CAPABILITIES,
     ROLES,
+    _audit as audit_dashboard_event,
     validate_dashboard_identity,
 )
 from spansh_facility_cache import SpanshFacilityError, get_system_facilities
@@ -485,6 +487,66 @@ def _protected_faction_summary(
         "description": str(current["description"] or ""),
         "active": bool(current["protected"]),
         "webhook_configured": webhook_configured,
+    }
+
+
+def _serialize_admin_protected_faction(row) -> dict[str, Any]:
+    try:
+        validate_discord_webhook(row["webhook_url"])
+        webhook_configured = True
+    except ValueError:
+        webhook_configured = False
+    return {
+        "id": int(row["id"]),
+        "name": str(row["name"]),
+        "description": str(row["description"] or ""),
+        "protected": bool(row["protected"]),
+        "webhook_configured": webhook_configured,
+    }
+
+
+def _protected_faction_name(value: Any) -> str:
+    name = str(value or "").strip()
+    if not name:
+        raise ValueError("Faction name is required")
+    if len(name) > 128:
+        raise ValueError("Faction name must not exceed 128 characters")
+    return name
+
+
+def _protected_faction_description(value: Any) -> str:
+    description = str(value or "").strip()
+    if len(description) > 128:
+        raise ValueError("Description must not exceed 128 characters")
+    return description
+
+
+def _pause_protected_faction_targets(
+    session, faction_id: int, now: str
+) -> dict[str, int]:
+    rule_subquery = (
+        "SELECT r.id FROM dashboard_bgs_rule r "
+        "JOIN dashboard_bgs_rule_package p ON p.id = r.package_id "
+        "WHERE p.protected_faction_id = :faction_id"
+    )
+    alerts = session.execute(
+        text(
+            "UPDATE dashboard_bgs_alert SET resolved_at = :now "
+            f"WHERE resolved_at IS NULL AND rule_id IN ({rule_subquery})"
+        ),
+        {"faction_id": faction_id, "now": now},
+    )
+    states = session.execute(
+        text(
+            "UPDATE dashboard_bgs_rule_state SET status = 'paused_target_missing', "
+            "condition_active = NULL, observations_json = '{}', last_error = NULL, "
+            f"updated_at = :now WHERE rule_id IN ({rule_subquery})"
+        ),
+        {"faction_id": faction_id, "now": now},
+    )
+    return {
+        "alerts_resolved": max(0, alerts.rowcount or 0),
+        "states_paused": max(0, states.rowcount or 0),
     }
 
 
@@ -1549,6 +1611,336 @@ def register_bgs_rule_routes(app, db, require_api_key, commit_with_retry, logger
         )
         commit_with_retry(db.session)
         return jsonify({"ok": True, "read_at": read_at, "acknowledged_at": acknowledged_at})
+
+    @app.route("/api/admin/protected-factions/candidates", methods=["GET"])
+    @require_api_key
+    @dashboard_only("protected-factions:manage")
+    def dashboard_protected_faction_candidates():
+        query = str(request.args.get("q") or "").strip()
+        if len(query) < 2:
+            return jsonify({"data": [], "generated_at": utc_now()})
+        if len(query) > 128:
+            return _error(
+                "INVALID_QUERY", "Faction search must not exceed 128 characters", 400
+            )
+        eddn_database = str(os.getenv("EDDN_DATABASE") or "").strip()
+        if not eddn_database:
+            return _error(
+                "EDDN_UNAVAILABLE", "EDDN faction search is not configured", 503
+            )
+        escaped = (
+            query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
+        engine = create_engine(eddn_database)
+        try:
+            with engine.connect() as connection:
+                rows = connection.execute(
+                    text(
+                        "SELECT DISTINCT name FROM eddn_faction "
+                        "WHERE name IS NOT NULL AND trim(name) != '' "
+                        "AND name LIKE :query ESCAPE '\\' "
+                        "ORDER BY name COLLATE NOCASE LIMIT 20"
+                    ),
+                    {"query": f"{escaped}%"},
+                ).all()
+        except Exception as exc:
+            logger.warning("Protected faction candidate search failed: %s", exc)
+            return _error(
+                "EDDN_UNAVAILABLE", "EDDN faction search is temporarily unavailable", 503
+            )
+        finally:
+            engine.dispose()
+        return jsonify(
+            {
+                "data": [{"name": str(row[0])} for row in rows],
+                "generated_at": utc_now(),
+            }
+        )
+
+    @app.route("/api/admin/protected-factions", methods=["GET", "POST"])
+    @require_api_key
+    @dashboard_only("protected-factions:manage")
+    def dashboard_protected_factions():
+        if request.method == "GET":
+            rows = db.session.execute(
+                text(
+                    "SELECT id, name, description, protected, webhook_url "
+                    "FROM protected_faction ORDER BY lower(name), id"
+                )
+            ).mappings().all()
+            data = [_serialize_admin_protected_faction(row) for row in rows]
+            return jsonify(
+                {
+                    "data": data,
+                    "generated_at": utc_now(),
+                    "pagination": {
+                        "page": 1,
+                        "page_size": len(data),
+                        "total": len(data),
+                    },
+                }
+            )
+
+        if len(request.get_data(cache=True)) > 16 * 1024:
+            return _error(
+                "PAYLOAD_TOO_LARGE", "Protected faction payload exceeds 16 KB", 413
+            )
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return _error("INVALID_FACTION", "A JSON object is required", 400)
+        try:
+            name = _protected_faction_name(data.get("name"))
+            description = _protected_faction_description(data.get("description"))
+            protected = data.get("protected", True)
+            if not isinstance(protected, bool):
+                raise ValueError("Protected must be true or false")
+            webhook_url = None
+            if data.get("webhook_url") is not None:
+                webhook_url = validate_discord_webhook(data.get("webhook_url"))
+        except ValueError as exc:
+            return _error("INVALID_FACTION", str(exc), 400)
+        duplicate = db.session.execute(
+            text("SELECT id FROM protected_faction WHERE lower(name) = lower(:name)"),
+            {"name": name},
+        ).first()
+        if duplicate:
+            return _error(
+                "DUPLICATE_FACTION", "A protected faction with this name already exists", 409
+            )
+        try:
+            inserted = db.session.execute(
+                text(
+                    "INSERT INTO protected_faction(name, webhook_url, description, protected) "
+                    "VALUES (:name, :webhook_url, :description, :protected)"
+                ),
+                {
+                    "name": name,
+                    "webhook_url": webhook_url,
+                    "description": description,
+                    "protected": int(protected),
+                },
+            )
+            faction_id = int(inserted.lastrowid)
+            audit_dashboard_event(
+                db.session,
+                "protected_factions.create",
+                "success",
+                "protected_faction",
+                faction_id,
+                {
+                    "protected": protected,
+                    "webhook_configured": webhook_url is not None,
+                },
+            )
+            commit_with_retry(db.session)
+        except IntegrityError:
+            db.session.rollback()
+            return _error(
+                "DUPLICATE_FACTION", "A protected faction with this name already exists", 409
+            )
+        row = db.session.execute(
+            text(
+                "SELECT id, name, description, protected, webhook_url "
+                "FROM protected_faction WHERE id = :id"
+            ),
+            {"id": faction_id},
+        ).mappings().one()
+        return jsonify({"data": _serialize_admin_protected_faction(row)}), 201
+
+    @app.route(
+        "/api/admin/protected-factions/<int:faction_id>",
+        methods=["PATCH", "DELETE"],
+    )
+    @require_api_key
+    @dashboard_only("protected-factions:manage")
+    def dashboard_protected_faction(faction_id):
+        current = db.session.execute(
+            text(
+                "SELECT id, name, description, protected, webhook_url "
+                "FROM protected_faction WHERE id = :id"
+            ),
+            {"id": faction_id},
+        ).mappings().first()
+        if not current:
+            return _error("NOT_FOUND", "Protected faction not found", 404)
+
+        if request.method == "DELETE":
+            now = utc_now()
+            impact = _pause_protected_faction_targets(db.session, faction_id, now)
+            db.session.execute(
+                text("DELETE FROM protected_faction WHERE id = :id"),
+                {"id": faction_id},
+            )
+            audit_dashboard_event(
+                db.session,
+                "protected_factions.delete",
+                "success",
+                "protected_faction",
+                faction_id,
+                {"name": current["name"], **impact},
+            )
+            commit_with_retry(db.session)
+            return jsonify({"ok": True, **impact})
+
+        if len(request.get_data(cache=True)) > 16 * 1024:
+            return _error(
+                "PAYLOAD_TOO_LARGE", "Protected faction payload exceeds 16 KB", 413
+            )
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return _error("INVALID_FACTION", "A JSON object is required", 400)
+        allowed = {"name", "description", "protected", "webhook_url"}
+        changed_fields = [key for key in allowed if key in data]
+        if not changed_fields:
+            return _error("INVALID_FACTION", "No supported fields were supplied", 400)
+        values = {
+            "name": current["name"],
+            "description": current["description"] or "",
+            "protected": bool(current["protected"]),
+            "webhook_url": current["webhook_url"],
+        }
+        try:
+            if "name" in data:
+                values["name"] = _protected_faction_name(data.get("name"))
+            if "description" in data:
+                values["description"] = _protected_faction_description(
+                    data.get("description")
+                )
+            if "protected" in data:
+                if not isinstance(data["protected"], bool):
+                    raise ValueError("Protected must be true or false")
+                values["protected"] = data["protected"]
+            if "webhook_url" in data:
+                values["webhook_url"] = (
+                    None
+                    if data["webhook_url"] is None
+                    else validate_discord_webhook(data["webhook_url"])
+                )
+        except ValueError as exc:
+            return _error("INVALID_FACTION", str(exc), 400)
+        duplicate = db.session.execute(
+            text(
+                "SELECT id FROM protected_faction "
+                "WHERE lower(name) = lower(:name) AND id != :id"
+            ),
+            {"name": values["name"], "id": faction_id},
+        ).first()
+        if duplicate:
+            return _error(
+                "DUPLICATE_FACTION", "A protected faction with this name already exists", 409
+            )
+        renamed = str(current["name"]).casefold() != str(values["name"]).casefold()
+        deactivated = bool(current["protected"]) and not bool(values["protected"])
+        now = utc_now()
+        impact = {"alerts_resolved": 0, "states_paused": 0}
+        try:
+            db.session.execute(
+                text(
+                    "UPDATE protected_faction SET name = :name, description = :description, "
+                    "protected = :protected, webhook_url = :webhook_url WHERE id = :id"
+                ),
+                {
+                    **values,
+                    "protected": int(bool(values["protected"])),
+                    "id": faction_id,
+                },
+            )
+            if renamed or deactivated:
+                impact = _pause_protected_faction_targets(
+                    db.session, faction_id, now
+                )
+            audit_dashboard_event(
+                db.session,
+                "protected_factions.update",
+                "success",
+                "protected_faction",
+                faction_id,
+                {
+                    "fields": sorted(changed_fields),
+                    "protected": bool(values["protected"]),
+                    "webhook_configured": values["webhook_url"] is not None,
+                    **impact,
+                },
+            )
+            commit_with_retry(db.session)
+        except IntegrityError:
+            db.session.rollback()
+            return _error(
+                "DUPLICATE_FACTION", "A protected faction with this name already exists", 409
+            )
+        updated = db.session.execute(
+            text(
+                "SELECT id, name, description, protected, webhook_url "
+                "FROM protected_faction WHERE id = :id"
+            ),
+            {"id": faction_id},
+        ).mappings().one()
+        return jsonify(
+            {"data": _serialize_admin_protected_faction(updated), **impact}
+        )
+
+    @app.route(
+        "/api/admin/protected-factions/<int:faction_id>/webhook-test",
+        methods=["POST"],
+    )
+    @require_api_key
+    @dashboard_only("protected-factions:manage")
+    def dashboard_protected_faction_webhook_test(faction_id):
+        row = db.session.execute(
+            text(
+                "SELECT id, name, webhook_url FROM protected_faction WHERE id = :id"
+            ),
+            {"id": faction_id},
+        ).mappings().first()
+        if not row:
+            return _error("NOT_FOUND", "Protected faction not found", 404)
+        try:
+            webhook = validate_discord_webhook(row["webhook_url"])
+        except ValueError:
+            return _error(
+                "WEBHOOK_NOT_CONFIGURED",
+                "No valid Discord webhook is configured for this faction",
+                409,
+            )
+        try:
+            response = requests.post(
+                webhook,
+                json={
+                    "content": (
+                        "✅ VALK dashboard protected-faction webhook test for "
+                        f"{row['name']}"
+                    ),
+                    "allowed_mentions": {"parse": []},
+                },
+                timeout=8,
+                allow_redirects=False,
+            )
+            if response.status_code not in (200, 204):
+                raise RuntimeError(f"Discord returned HTTP {response.status_code}")
+        except (requests.RequestException, RuntimeError) as exc:
+            audit_dashboard_event(
+                db.session,
+                "protected_factions.webhook_test",
+                "failure",
+                "protected_faction",
+                faction_id,
+                {"reason": type(exc).__name__},
+            )
+            commit_with_retry(db.session)
+            return _error(
+                "WEBHOOK_DELIVERY_FAILED",
+                "Discord did not accept the protected-faction test message",
+                502,
+            )
+        audit_dashboard_event(
+            db.session,
+            "protected_factions.webhook_test",
+            "success",
+            "protected_faction",
+            faction_id,
+        )
+        commit_with_retry(db.session)
+        return jsonify({"ok": True})
 
     @app.route("/api/account/discord-webhook", methods=["GET", "PUT", "DELETE"])
     @require_api_key

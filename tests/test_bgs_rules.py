@@ -8,6 +8,7 @@ import uuid
 from functools import wraps
 from types import SimpleNamespace
 
+import requests
 from flask import Flask, g, request
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import scoped_session, sessionmaker
@@ -684,10 +685,12 @@ class RuleApiPermissionTest(unittest.TestCase):
             """))
             conn.execute(text("INSERT INTO users(id, username, password_hash, is_admin, active) VALUES (1, 'member', 'hash', 0, 1)"))
             conn.execute(text("INSERT INTO users(id, username, password_hash, is_admin, active) VALUES (2, 'lead', 'hash', 0, 1)"))
+            conn.execute(text("INSERT INTO users(id, username, password_hash, is_admin, active) VALUES (3, 'admin', 'hash', 1, 1)"))
         ensure_dashboard_schema(self.engine)
         now = utc_now()
         with self.engine.begin() as conn:
             conn.execute(text("UPDATE users SET role='leadership' WHERE id=2"))
+            conn.execute(text("UPDATE users SET role='admin' WHERE id=3"))
             conn.execute(
                 text(
                     "INSERT INTO protected_faction(id, name, webhook_url, description, protected) "
@@ -695,7 +698,7 @@ class RuleApiPermissionTest(unittest.TestCase):
                     "'Protected ally', 1)"
                 )
             )
-            for user_id, session_id in ((1, "member-session"), (2, "lead-session")):
+            for user_id, session_id in ((1, "member-session"), (2, "lead-session"), (3, "admin-session")):
                 conn.execute(
                     text("INSERT INTO dashboard_session(id, expiresAt, token, createdAt, updatedAt, userId) VALUES (:id, '2999-01-01T00:00:00+00:00', :token, :now, :now, :user_id)"),
                     {"id": session_id, "token": f"token-{user_id}", "now": now, "user_id": user_id},
@@ -714,6 +717,7 @@ class RuleApiPermissionTest(unittest.TestCase):
                 identities = {
                     "Bearer member": {"sub": "1", "role": "member", "capabilities": ["dashboard:read", "rules:write"], "sid": "member-session"},
                     "Bearer lead": {"sub": "2", "role": "leadership", "capabilities": ["dashboard:read", "rules:write", "tenant-rules:write", "bgs-ai:run"], "sid": "lead-session"},
+                    "Bearer admin": {"sub": "3", "role": "admin", "capabilities": ["dashboard:read", "protected-factions:manage"], "sid": "admin-session"},
                 }
                 g.dashboard_identity = identities.get(request.headers.get("authorization"))
                 g.tenant = {"id": "test", "name": "Test", "faction_name": "Test Faction", "discord_webhooks": {}}
@@ -919,6 +923,228 @@ class RuleApiPermissionTest(unittest.TestCase):
         self.assertNotEqual(second.get_json()["data"]["id"], package["id"])
         self.assertEqual(second.get_json()["data"]["protected_faction_id"], 10)
         self.assertFalse(second.get_json()["discord_enabled"])
+
+    def test_admin_protected_faction_crud_masks_webhooks_and_checks_permissions(self):
+        api_key_only = self.client.get("/api/admin/protected-factions")
+        self.assertEqual(api_key_only.status_code, 401)
+        leadership = self.client.get(
+            "/api/admin/protected-factions",
+            headers={"authorization": "Bearer lead"},
+        )
+        self.assertEqual(leadership.status_code, 403)
+
+        listed = self.client.get(
+            "/api/admin/protected-factions",
+            headers={"authorization": "Bearer admin"},
+        )
+        self.assertEqual(listed.status_code, 200)
+        self.assertNotIn("webhook_url", listed.get_json()["data"][0])
+        self.assertTrue(listed.get_json()["data"][0]["webhook_configured"])
+
+        invalid = self.client.post(
+            "/api/admin/protected-factions",
+            headers={"authorization": "Bearer admin"},
+            json={
+                "name": "Unsafe Ally",
+                "webhook_url": "https://discord.com.evil.invalid/api/webhooks/1/token",
+            },
+        )
+        self.assertEqual(invalid.status_code, 400)
+        duplicate = self.client.post(
+            "/api/admin/protected-factions",
+            headers={"authorization": "Bearer admin"},
+            json={"name": "aegis shield"},
+        )
+        self.assertEqual(duplicate.status_code, 409)
+
+        secret = "https://discord.com/api/webhooks/987654/private_token"
+        created = self.client.post(
+            "/api/admin/protected-factions",
+            headers={"authorization": "Bearer admin"},
+            json={
+                "name": "Beacon Guard",
+                "description": "Protected ally",
+                "protected": True,
+                "webhook_url": secret,
+            },
+        )
+        self.assertEqual(created.status_code, 201)
+        payload = created.get_json()["data"]
+        self.assertNotIn("webhook_url", payload)
+        self.assertTrue(payload["webhook_configured"])
+
+        with patch("bgs_rules.requests.post") as post:
+            post.return_value = SimpleNamespace(status_code=204)
+            tested = self.client.post(
+                f"/api/admin/protected-factions/{payload['id']}/webhook-test",
+                headers={"authorization": "Bearer admin"},
+            )
+        self.assertEqual(tested.status_code, 200)
+        self.assertEqual(post.call_args.args[0], secret)
+        self.assertEqual(post.call_args.kwargs["json"]["allowed_mentions"], {"parse": []})
+        self.assertFalse(post.call_args.kwargs["allow_redirects"])
+        with patch(
+            "bgs_rules.requests.post",
+            side_effect=requests.RequestException(f"delivery failed for {secret}"),
+        ):
+            failed_test = self.client.post(
+                f"/api/admin/protected-factions/{payload['id']}/webhook-test",
+                headers={"authorization": "Bearer admin"},
+            )
+        self.assertEqual(failed_test.status_code, 502)
+        self.assertNotIn("private_token", failed_test.get_data(as_text=True))
+
+        preserved = self.client.patch(
+            f"/api/admin/protected-factions/{payload['id']}",
+            headers={"authorization": "Bearer admin"},
+            json={"description": "Updated"},
+        )
+        self.assertEqual(preserved.status_code, 200)
+        self.assertTrue(preserved.get_json()["data"]["webhook_configured"])
+
+        removed = self.client.patch(
+            f"/api/admin/protected-factions/{payload['id']}",
+            headers={"authorization": "Bearer admin"},
+            json={"webhook_url": None},
+        )
+        self.assertEqual(removed.status_code, 200)
+        self.assertFalse(removed.get_json()["data"]["webhook_configured"])
+        deleted = self.client.delete(
+            f"/api/admin/protected-factions/{payload['id']}",
+            headers={"authorization": "Bearer admin"},
+        )
+        self.assertEqual(deleted.status_code, 200)
+
+        audit_payload = " ".join(
+            str(row[0] or "")
+            for row in self.session.execute(
+                text("SELECT metadata_json FROM dashboard_audit_event")
+            ).all()
+        )
+        self.assertNotIn("private_token", audit_payload)
+
+    def test_deactivation_pauses_protected_rules_and_resolves_alerts(self):
+        catalog = self.client.get(
+            "/api/dashboard/bgs/rule-templates",
+            headers={"authorization": "Bearer lead"},
+        ).get_json()
+        template = next(
+            item
+            for item in catalog["data"]
+            if item["target_kind"] == "protected_faction"
+        )
+        package = self.client.post(
+            f"/api/dashboard/bgs/rule-templates/{template['id']}/apply",
+            headers={"authorization": "Bearer lead"},
+            json={"watchlist_scope": "protected", "protected_faction_id": 9},
+        ).get_json()["data"]
+        rule_id = package["rules"][0]["id"]
+        now = utc_now()
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO dashboard_bgs_rule_state(rule_id, system_key, system_name, "
+                    "condition_active, status, observations_json, updated_at) "
+                    "VALUES (:rule_id, 'test system', 'Test System', 1, 'active', '{}', :now)"
+                ),
+                {"rule_id": rule_id, "now": now},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO dashboard_bgs_alert(id, rule_id, rule_name, owner_scope, "
+                    "system_key, system_name, severity, title, message, facts_json, event_key, "
+                    "fired_ticktime, fired_at) VALUES ('protected-alert', :rule_id, 'Guard', "
+                    "'tenant', 'test system', 'Test System', 'warning', 'Alert', 'Message', "
+                    "'{}', 'condition', '2026-08-30T00:00:00Z', :now)"
+                ),
+                {"rule_id": rule_id, "now": now},
+            )
+
+        deactivated = self.client.patch(
+            "/api/admin/protected-factions/9",
+            headers={"authorization": "Bearer admin"},
+            json={"protected": False},
+        )
+        self.assertEqual(deactivated.status_code, 200)
+        self.assertEqual(deactivated.get_json()["states_paused"], 1)
+        self.assertEqual(deactivated.get_json()["alerts_resolved"], 1)
+        state = self.session.execute(
+            text(
+                "SELECT status, condition_active FROM dashboard_bgs_rule_state "
+                "WHERE rule_id = :rule_id"
+            ),
+            {"rule_id": rule_id},
+        ).one()
+        self.assertEqual(state[0], "paused_target_missing")
+        self.assertIsNone(state[1])
+        self.assertIsNotNone(
+            self.session.execute(
+                text("SELECT resolved_at FROM dashboard_bgs_alert WHERE id='protected-alert'")
+            ).scalar_one()
+        )
+
+        reactivated = self.client.patch(
+            "/api/admin/protected-factions/9",
+            headers={"authorization": "Bearer admin"},
+            json={"protected": True},
+        )
+        self.assertEqual(reactivated.status_code, 200)
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE dashboard_bgs_rule_state SET status='active', condition_active=1 "
+                    "WHERE rule_id=:rule_id"
+                ),
+                {"rule_id": rule_id},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO dashboard_bgs_alert(id, rule_id, rule_name, owner_scope, "
+                    "system_key, system_name, severity, title, message, facts_json, event_key, "
+                    "fired_ticktime, fired_at) VALUES ('renamed-alert', :rule_id, 'Guard', "
+                    "'tenant', 'test system', 'Test System', 'warning', 'Alert', 'Message', "
+                    "'{}', 'condition', '2026-08-31T00:00:00Z', :now)"
+                ),
+                {"rule_id": rule_id, "now": now},
+            )
+        renamed = self.client.patch(
+            "/api/admin/protected-factions/9",
+            headers={"authorization": "Bearer admin"},
+            json={"name": "Aegis Shield Renamed"},
+        )
+        self.assertEqual(renamed.status_code, 200)
+        self.assertEqual(renamed.get_json()["states_paused"], 1)
+        self.assertEqual(renamed.get_json()["alerts_resolved"], 1)
+
+    def test_admin_protected_faction_candidates_use_eddn_prefix_search(self):
+        with tempfile.TemporaryDirectory() as temp_directory:
+            database_path = Path(temp_directory) / "eddn.sqlite"
+            engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+            with engine.begin() as connection:
+                connection.execute(
+                    text("CREATE TABLE eddn_faction(name TEXT, system_name TEXT)")
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO eddn_faction(name, system_name) VALUES "
+                        "('Aegis Shield', 'One'), ('Aegis Vanguard', 'Two'), "
+                        "('Beacon Guard', 'Three')"
+                    )
+                )
+            engine.dispose()
+            with patch.dict(
+                os.environ,
+                {"EDDN_DATABASE": f"sqlite:///{database_path.as_posix()}"},
+            ):
+                response = self.client.get(
+                    "/api/admin/protected-factions/candidates?q=Ae",
+                    headers={"authorization": "Bearer admin"},
+                )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [item["name"] for item in response.get_json()["data"]],
+            ["Aegis Shield", "Aegis Vanguard"],
+        )
 
 
 if __name__ == "__main__":

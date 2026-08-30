@@ -45,6 +45,7 @@ ROLE_CAPABILITIES = {
         "admin:read",
         "users:read",
         "users:manage",
+        "protected-factions:manage",
     },
 }
 SCHEMA_VERSION = 7

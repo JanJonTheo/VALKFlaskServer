@@ -10,7 +10,7 @@ from functools import wraps
 import bcrypt
 import requests as http_requests
 from cmdr_sync_inara import sync_cmdrs_with_inara
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dateutil.relativedelta import relativedelta
 import os
 import threading
@@ -21,6 +21,21 @@ from activities import activities_bp
 from mining import mining_bp
 from sysmap import sysmap_bp
 from manual_activity import manual_activity_bp
+from colonisation import colonisation_bp
+from dashboard_auth import DashboardTokenError, require_capability, validate_dashboard_token
+from dashboard_users import (
+    create_dashboard_session,
+    dashboard_identity_email,
+    ensure_dashboard_schema,
+    register_dashboard_user_routes,
+    validate_dashboard_identity,
+)
+from spansh_facility_cache import (
+    SpanshFacilityError,
+    get_facility_type_statistics,
+    get_system_facilities,
+)
+from bgs_rules import register_bgs_rule_routes
 
 # Globaler Lock für alle Schreibzugriffe auf die Tenant-DB (Events & Activities)
 db_write_lock = threading.Lock()
@@ -32,7 +47,41 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Default API version
-API_VERSION = os.getenv("API_VERSION_PROD", "1.6.0")
+API_VERSION = os.getenv("API_VERSION_PROD", "1.8.0")
+
+# BGS-Tally only sends journal events that are advertised by /discovery.
+# Keep the previous default event set and explicitly opt in to Colonisation.
+BGS_TALLY_DISCOVERY_EVENTS = {
+    "ApproachSettlement": {},
+    "CargoDepot": {},
+    "CarrierJump": {},
+    "CommitCrime": {},
+    "Died": {},
+    "Docked": {},
+    "FactionKillBond": {},
+    "FSDJump": {},
+    "Location": {},
+    "MarketBuy": {},
+    "MarketSell": {},
+    "MissionAbandoned": {},
+    "MissionAccepted": {},
+    "MissionCompleted": {},
+    "MissionFailed": {},
+    "MissionRedirected": {},
+    "Missions": {},
+    "MultiSellExplorationData": {},
+    "RedeemVoucher": {},
+    "SellExplorationData": {},
+    "StartUp": {},
+    "SyntheticCZ": {},
+    "SyntheticGroundCZ": {},
+    "SyntheticCZObjective": {},
+    "SyntheticScenario": {},
+    "ColonisationSystemClaim": {},
+    "ColonisationBeaconDeployed": {},
+    "ColonisationConstructionDepot": {},
+    "ColonisationContribution": {},
+}
 
 # Tenant-Konfiguration laden
 TENANT_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "tenant.json")
@@ -62,6 +111,7 @@ app.register_blueprint(activities_bp)
 app.register_blueprint(mining_bp)
 app.register_blueprint(sysmap_bp)
 app.register_blueprint(manual_activity_bp)
+app.register_blueprint(colonisation_bp)
 
 
 ##################################################################
@@ -126,6 +176,8 @@ def set_tenant_db_config(tenant):
                     cursor = dbapi_connection.cursor()
                     cursor.execute("PRAGMA journal_mode=WAL;")
                     cursor.execute("PRAGMA synchronous=NORMAL;")
+                    cursor.execute("PRAGMA foreign_keys=ON;")
+                    cursor.execute("PRAGMA busy_timeout=5000;")
                     cursor.close()
 
                 event.listen(engine, "connect", _set_sqlite_pragma)
@@ -179,6 +231,25 @@ def remove_session(exception=None):
 def require_api_key(f):
     @wraps(f)
     def decorated(*args, **kwargs):
+        authorization = request.headers.get("authorization", "")
+        if authorization.lower().startswith("bearer "):
+            try:
+                tenant, claims = validate_dashboard_token(authorization.split(" ", 1)[1], TENANTS)
+            except DashboardTokenError as exc:
+                logger.warning("Rejected dashboard bearer token: %s", exc)
+                return jsonify({"error": {"code": "UNAUTHORIZED", "message": str(exc), "correlation_id": request.headers.get("x-correlation-id")}}), 401
+            g.tenant = tenant
+            g.dashboard_identity = claims
+            set_tenant_db_config(tenant)
+            if hasattr(g, "tenant_db_error"):
+                return jsonify({"error": {"code": "TENANT_DATABASE_ERROR", "message": g.tenant_db_error, "correlation_id": request.headers.get("x-correlation-id")}}), 500
+            try:
+                validate_dashboard_identity(db.session, claims, require_session=False)
+            except PermissionError as exc:
+                logger.warning("Rejected inactive, stale or revoked dashboard identity: %s", exc)
+                return jsonify({"error": {"code": "SESSION_REVOKED", "message": str(exc), "correlation_id": request.headers.get("x-correlation-id")}}), 401
+            return f(*args, **kwargs)
+
         apikey = request.headers.get("apikey")
         tenant = get_tenant_by_apikey(apikey)
         if not tenant:
@@ -466,40 +537,68 @@ def post_events():
                         systemaddress=event_dict.get("SystemAddress")
                     ))
                 elif event.event == "MissionCompleted":
-                    db.session.add(MissionCompletedEvent(
+                    mission_completed = MissionCompletedEvent(
                         event_id=event.id,
                         mission_id=event_dict.get("MissionID"),
                         name=event_dict.get("Name"),
                         mission_name=event_dict.get("Name"),
                         reward=event_dict.get("Reward"),
                         faction=event_dict.get("Faction"),
+                        awarding_faction=event_dict.get("Faction"),
                         donor=event_dict.get("Donor"),
                         target_faction=event_dict.get("TargetFaction"),
                         target_type=event_dict.get("TargetType"),
                         target=event_dict.get("Target"),
                         kill_count=event_dict.get("KillCount")
-                    ))
+                    )
+                    db.session.add(mission_completed)
+                    db.session.flush()  # erzeugt mission_completed.id für Influence-FKs
+
                     # MissionCompletedInfluence-Einträge
-                    from models import MissionCompletedInfluence
-                    faction_effects = event_dict.get("FactionEffects", [])
+                    faction_effects = event_dict.get("FactionEffects") or []
+                    if not isinstance(faction_effects, list):
+                        faction_effects = []
                     for effect in faction_effects:
+                        if not isinstance(effect, dict):
+                            continue
                         faction_name = effect.get("Faction")
                         reputation = effect.get("Reputation")
                         reputation_trend = effect.get("ReputationTrend")
-                        effect_entries = effect.get("Effects", [])
-                        influence_entries = effect.get("Influence", [])
+                        effect_entries = effect.get("Effects") or []
+                        influence_entries = effect.get("Influence") or []
+                        if not isinstance(effect_entries, list):
+                            effect_entries = []
+                        if not isinstance(influence_entries, list):
+                            influence_entries = []
+                        first_effect = next(
+                            (entry for entry in effect_entries if isinstance(entry, dict)),
+                            {},
+                        )
                         for infl in influence_entries:
+                            if not isinstance(infl, dict):
+                                continue
                             db.session.add(MissionCompletedInfluence(
-                                mission_id=event.id,
+                                mission_id=mission_completed.id,
+                                event_id=event.id,
                                 system=infl.get("SystemAddress"),
                                 influence=infl.get("Influence"),
                                 trend=infl.get("Trend"),
                                 faction_name=faction_name,
                                 reputation=reputation,
                                 reputation_trend=reputation_trend,
-                                effect=effect_entries[0].get("Effect") if effect_entries else None,
-                                effect_trend=effect_entries[0].get("Trend") if effect_entries else None
+                                effect=first_effect.get("Effect"),
+                                effect_trend=first_effect.get("Trend")
                             ))
+                elif event.event == "MissionFailed":
+                    db.session.add(MissionFailedEvent(
+                        event_id=event.id,
+                        mission_id=event_dict.get("MissionID"),
+                        name=event_dict.get("Name"),
+                        mission_name=event_dict.get("Name"),
+                        faction=event_dict.get("Faction"),
+                        awarding_faction=event_dict.get("Faction"),
+                        fine=event_dict.get("Fine")
+                    ))
                 elif event.event == "FactionKillBond":
                     from models import FactionKillBondEvent
                     db.session.add(FactionKillBondEvent(
@@ -626,23 +725,61 @@ def discovery():
     try:
         discovery_response = {
             "name": os.getenv("SERVER_NAME_PROD"),
+            "version": API_VERSION,
             "description": os.getenv("SERVER_DESCRIPTION_PROD"),
             "url": os.getenv("SERVER_URL_PROD"),
+            "events": BGS_TALLY_DISCOVERY_EVENTS,
             "endpoints": {
                 "events": {
                     "path": "/events",
                     "minPeriod": "10",
-                    "maxBatch": "100"
+                    "min_period": "10",
+                    "maxBatch": "100",
+                    "max_batch": "100"
                 },
                 "activities": {
                     "path": "/activities",
                     "minPeriod": "60",
-                    "maxBatch": "10"
+                    "min_period": "60",
+                    "maxBatch": "10",
+                    "max_batch": "10"
                 },
                 "objectives": {
                     "path": "/objectives",
                     "minPeriod": "30",
-                    "maxBatch": "20"
+                    "min_period": "30",
+                    "maxBatch": "20",
+                    "max_batch": "20"
+                }
+            },
+            "app_endpoints": {
+                "colonisation_targets": {
+                    "method": "GET",
+                    "path": "/api/colonisation/targets"
+                },
+                "colonisation_summary": {
+                    "method": "GET",
+                    "path": "/api/colonisation/summary"
+                },
+                "colonisation_summary_text": {
+                    "method": "GET",
+                    "path": "/api/colonisation/summary/text"
+                },
+                "colonisation_contributions": {
+                    "method": "GET",
+                    "path": "/api/colonisation/contributions"
+                },
+                "colonisation_constructions": {
+                    "method": "GET",
+                    "path": "/api/colonisation/constructions"
+                },
+                "colonisation_deliveries": {
+                    "methods": ["GET", "POST"],
+                    "path": "/api/colonisation/deliveries"
+                },
+                "colonisation_status": {
+                    "method": "POST",
+                    "path": "/api/colonisation/status"
                 }
             },
             "headers": {
@@ -672,11 +809,16 @@ def root():
     try:
         return jsonify({
             "message": "VALK Flask Server is running",
-            "version": os.getenv("API_VERSION_PROD", "1.6.0"),
+            "version": API_VERSION,
             "name": os.getenv("SERVER_NAME_PROD", "VALK Flask Server"),
             "endpoints": {
                 "discovery": "/discovery",
-                "api": "/api/"
+                "api": "/api/",
+                "colonisation_summary": "/api/colonisation/summary",
+                "colonisation_summary_text": "/api/colonisation/summary/text",
+                "colonisation_targets": "/api/colonisation/targets",
+                "colonisation_contributions": "/api/colonisation/contributions",
+                "colonisation_constructions": "/api/colonisation/constructions"
             }
         }), 200
     except Exception as e:
@@ -747,7 +889,10 @@ def summary_api(key):
         "influence-by-faction": """
             SELECT e.cmdr, mci.faction_name, SUM(LENGTH(mci.influence)) AS influence
             FROM mission_completed_influence mci
-            JOIN mission_completed_event mce ON mce.event_id = mci.mission_id
+            JOIN mission_completed_event mce ON (
+                (mci.event_id IS NOT NULL AND mce.id = mci.mission_id)
+                OR (mci.event_id IS NULL AND mce.event_id = mci.mission_id)
+            )
             JOIN event e ON e.id = mce.event_id
             WHERE e.cmdr IS NOT NULL AND {date_filter}
             GROUP BY e.cmdr, mci.faction_name
@@ -756,7 +901,10 @@ def summary_api(key):
         "influence-eic": """
             SELECT e.cmdr, mci.faction_name, SUM(LENGTH(mci.influence)) AS influence
             FROM mission_completed_influence mci
-            JOIN mission_completed_event mce ON mce.event_id = mci.mission_id
+            JOIN mission_completed_event mce ON (
+                (mci.event_id IS NOT NULL AND mce.id = mci.mission_id)
+                OR (mci.event_id IS NULL AND mce.event_id = mci.mission_id)
+            )
             JOIN event e ON e.id = mce.event_id
             WHERE e.cmdr IS NOT NULL
             AND mci.faction_name LIKE :faction_name_like
@@ -993,7 +1141,10 @@ def summary_top5_api(key):
         "influence-by-faction": """
             SELECT e.cmdr, mci.faction_name, SUM(LENGTH(mci.influence)) AS influence
             FROM mission_completed_influence mci
-            JOIN mission_completed_event mce ON mce.event_id = mci.mission_id
+            JOIN mission_completed_event mce ON (
+                (mci.event_id IS NOT NULL AND mce.id = mci.mission_id)
+                OR (mci.event_id IS NULL AND mce.event_id = mci.mission_id)
+            )
             JOIN event e ON e.id = mce.event_id
             WHERE e.cmdr IS NOT NULL AND {date_filter}
             GROUP BY e.cmdr, mci.faction_name
@@ -1003,7 +1154,10 @@ def summary_top5_api(key):
         "influence-eic": """
             SELECT e.cmdr, mci.faction_name, SUM(LENGTH(mci.influence)) AS influence
             FROM mission_completed_influence mci
-            JOIN mission_completed_event mce ON mce.event_id = mci.mission_id
+            JOIN mission_completed_event mce ON (
+                (mci.event_id IS NOT NULL AND mce.id = mci.mission_id)
+                OR (mci.event_id IS NULL AND mce.event_id = mci.mission_id)
+            )
             JOIN event e ON e.id = mce.event_id
             WHERE e.cmdr IS NOT NULL 
             AND mci.faction_name LIKE :faction_name_like
@@ -1226,7 +1380,10 @@ def build_leaderboard_data(timeframe, system_name=None):
            (
              SELECT SUM(LENGTH(mci.influence))
              FROM mission_completed_influence mci
-             JOIN mission_completed_event mce ON mce.event_id = mci.mission_id
+             JOIN mission_completed_event mce ON (
+               (mci.event_id IS NOT NULL AND mce.id = mci.mission_id)
+               OR (mci.event_id IS NULL AND mce.event_id = mci.mission_id)
+             )
              JOIN event ex ON ex.id = mce.event_id
              WHERE ex.cmdr = e.cmdr
              AND mci.faction_name LIKE :faction_name_like
@@ -1424,7 +1581,10 @@ def leaderboard_summary():
                (
                  SELECT SUM(LENGTH(mci.influence))
                  FROM mission_completed_influence mci
-                 JOIN mission_completed_event mce ON mce.event_id = mci.mission_id
+                 JOIN mission_completed_event mce ON (
+                   (mci.event_id IS NOT NULL AND mce.id = mci.mission_id)
+                   OR (mci.event_id IS NULL AND mce.event_id = mci.mission_id)
+                 )
                  JOIN event ex ON ex.id = mce.event_id
                  WHERE ex.cmdr = e.cmdr
                  AND mci.faction_name LIKE :faction_name_like
@@ -1634,6 +1794,7 @@ def get_bounty_vouchers():
 # Table-Query-API Endpoint
 @app.route("/api/table/<tablename>", methods=["GET"])
 @require_api_key
+@require_capability("admin:read", logger)
 def query_table(tablename):
     try:
         # Security check: Ensure the table name is valid and exists
@@ -1644,10 +1805,51 @@ def query_table(tablename):
         if not result:
             return jsonify({"error": f"Table '{tablename}' not found."}), 404
 
-        # Daten abfragen
-        rows = db.session.execute(text(f"SELECT * FROM {tablename}")).fetchall()
-        data = [dict(row._mapping) for row in rows]
-        return jsonify(data)
+        # Legacy clients keep the unpaginated response shape. Dashboard bearer
+        # sessions and clients that opt into paging get a bounded envelope.
+        dashboard_request = bool(getattr(g, "dashboard_identity", None))
+        paginated = dashboard_request or request.args.get("page") or request.args.get("page_size")
+        if not paginated:
+            rows = db.session.execute(text(f'SELECT * FROM "{tablename}"')).fetchall()
+            return jsonify([dict(row._mapping) for row in rows])
+
+        column_rows = db.session.execute(text(f'PRAGMA table_info("{tablename}")')).fetchall()
+        columns = {row._mapping["name"] for row in column_rows}
+        page = max(1, request.args.get("page", 1, type=int) or 1)
+        page_size = min(250, max(1, request.args.get("page_size", 25, type=int) or 25))
+        sort = request.args.get("sort")
+        if sort not in columns:
+            sort = next(iter(columns), None)
+        direction = "DESC" if request.args.get("direction", "asc").lower() == "desc" else "ASC"
+
+        clauses = []
+        params = {}
+        try:
+            filters = json.loads(request.args.get("filters", "[]"))
+        except json.JSONDecodeError:
+            return jsonify({"error": {"code": "INVALID_FILTER", "message": "filters must be valid JSON", "correlation_id": request.headers.get("x-correlation-id")}}), 400
+        if not isinstance(filters, list):
+            return jsonify({"error": {"code": "INVALID_FILTER", "message": "filters must be a list", "correlation_id": request.headers.get("x-correlation-id")}}), 400
+        for index, item in enumerate(filters[:20]):
+            if not isinstance(item, dict) or item.get("field") not in columns:
+                continue
+            field = item["field"]
+            operator = item.get("operator", "eq")
+            key = f"filter_{index}"
+            if operator == "contains":
+                clauses.append(f'CAST("{field}" AS TEXT) LIKE :{key}')
+                params[key] = f'%{item.get("value", "")}%'
+            elif operator in {"gte", "lte", "eq"}:
+                sql_operator = {"gte": ">=", "lte": "<=", "eq": "="}[operator]
+                clauses.append(f'"{field}" {sql_operator} :{key}')
+                params[key] = item.get("value")
+
+        where_sql = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        total = db.session.execute(text(f'SELECT COUNT(*) FROM "{tablename}"{where_sql}'), params).scalar() or 0
+        params.update({"limit": page_size, "offset": (page - 1) * page_size})
+        order_sql = f' ORDER BY "{sort}" {direction}' if sort else ""
+        rows = db.session.execute(text(f'SELECT * FROM "{tablename}"{where_sql}{order_sql} LIMIT :limit OFFSET :offset'), params).fetchall()
+        return jsonify({"data": [dict(row._mapping) for row in rows], "generated_at": datetime.utcnow().isoformat() + "Z", "pagination": {"page": page, "page_size": page_size, "total": total}})
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1702,7 +1904,14 @@ def delete_cmdr(name):
             mission_ids = [r[0] for r in mission_id_rows] if mission_id_rows else []
 
             if mission_ids:
-                deleted_counts["mission_influence"] = db.session.query(MissionCompletedInfluence).filter(MissionCompletedInfluence.mission_id.in_(mission_ids)).delete(synchronize_session=False)
+                legacy_mission_links = set(mission_ids + event_ids)
+                deleted_counts["mission_influence"] = db.session.query(MissionCompletedInfluence).filter(
+                    MissionCompletedInfluence.event_id.in_(event_ids)
+                    | (
+                        MissionCompletedInfluence.event_id.is_(None)
+                        & MissionCompletedInfluence.mission_id.in_(legacy_mission_links)
+                    )
+                ).delete(synchronize_session=False)
 
             deleted_counts["market_buy"] = db.session.query(MarketBuyEvent).filter(MarketBuyEvent.event_id.in_(event_ids)).delete(synchronize_session=False)
             deleted_counts["market_sell"] = db.session.query(MarketSellEvent).filter(MarketSellEvent.event_id.in_(event_ids)).delete(synchronize_session=False)
@@ -1913,7 +2122,10 @@ def _query_report_metric(key, timeframe, top5=False):
         "influence-by-faction": f"""
             SELECT e.cmdr, mci.faction_name, SUM(LENGTH(mci.influence)) AS influence
             FROM mission_completed_influence mci
-            JOIN mission_completed_event mce ON mce.event_id = mci.mission_id
+            JOIN mission_completed_event mce ON (
+                (mci.event_id IS NOT NULL AND mce.id = mci.mission_id)
+                OR (mci.event_id IS NULL AND mce.event_id = mci.mission_id)
+            )
             JOIN event e ON e.id = mce.event_id
             WHERE e.cmdr IS NOT NULL AND {{date_filter}}
             GROUP BY e.cmdr, mci.faction_name
@@ -1922,7 +2134,10 @@ def _query_report_metric(key, timeframe, top5=False):
         "influence-eic": f"""
             SELECT e.cmdr, mci.faction_name, SUM(LENGTH(mci.influence)) AS influence
             FROM mission_completed_influence mci
-            JOIN mission_completed_event mce ON mce.event_id = mci.mission_id
+            JOIN mission_completed_event mce ON (
+                (mci.event_id IS NOT NULL AND mce.id = mci.mission_id)
+                OR (mci.event_id IS NULL AND mce.event_id = mci.mission_id)
+            )
             JOIN event e ON e.id = mce.event_id
             WHERE e.cmdr IS NOT NULL AND mci.faction_name LIKE :faction_name_like AND {{date_filter}}
             GROUP BY e.cmdr, mci.faction_name
@@ -2141,6 +2356,7 @@ def _assessment_debug(response=None, compact_payload=None, text_value=None):
 
 @app.route("/api/summary/monthly-performance/assessment", methods=["POST"])
 @require_api_key
+@require_capability("assessment:run", logger)
 def monthly_performance_assessment():
     payload = request.get_json(silent=True) or {}
     monthly_data = payload.get("monthly_data")
@@ -2220,6 +2436,7 @@ def monthly_performance_debug():
 
 @app.route("/api/summary/discord/report", methods=["POST"])
 @require_api_key
+@require_capability("reports:send", logger)
 def send_summary_report_to_discord():
     try:
         payload = request.get_json(silent=True) or {}
@@ -2369,7 +2586,10 @@ def send_all_top5_to_discord():
             "sql": '''
                 SELECT e.cmdr, mci.faction_name, SUM(LENGTH(mci.influence)) AS influence
                 FROM mission_completed_influence mci
-                JOIN mission_completed_event mce ON mce.event_id = mci.mission_id
+                JOIN mission_completed_event mce ON (
+                  (mci.event_id IS NOT NULL AND mce.id = mci.mission_id)
+                  OR (mci.event_id IS NULL AND mce.event_id = mci.mission_id)
+                )
                 JOIN event e ON e.id = mce.event_id
                 WHERE e.cmdr IS NOT NULL
                 GROUP BY e.cmdr, mci.faction_name
@@ -2385,9 +2605,12 @@ def send_all_top5_to_discord():
             "sql": '''
                 SELECT e.cmdr, mci.faction_name, SUM(LENGTH(mci.influence)) AS influence
                 FROM mission_completed_influence mci
-                JOIN mission_completed_event mce ON mce.event_id = mci.mission_id
+                JOIN mission_completed_event mce ON (
+                  (mci.event_id IS NOT NULL AND mce.id = mci.mission_id)
+                  OR (mci.event_id IS NULL AND mce.event_id = mci.mission_id)
+                )
                 JOIN event e ON e.id = mce.event_id
-                WHERE e.cmdr IS NOT NULL 
+                WHERE e.cmdr IS NOT NULL
                 AND mci.faction_name LIKE :faction_name_like
                 GROUP BY e.cmdr, mci.faction_name
                 ORDER BY influence DESC, e.cmdr
@@ -2514,7 +2737,7 @@ def send_all_top5_to_discord():
 def trigger_daily_tick_summary():
     try:
         from fac_shoutout_scheduler import format_discord_summary
-        format_discord_summary(app, db)
+        format_discord_summary(app, db, tenant=g.tenant)
         return jsonify({"status": "Daily summary triggered"}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -2615,18 +2838,45 @@ def login_api():
         if not username or not password:
             return jsonify({"error": "Missing credentials"}), 400
 
-        query = text("SELECT id, password_hash, is_admin FROM users WHERE username = :username AND active = 1")
+        query = text(
+            "SELECT id, password_hash, is_admin, role, must_change_password, auth_email "
+            "FROM users WHERE username = :username AND active = 1"
+        )
         result = db.session.execute(query, {"username": username}).fetchone()
 
         if not result:
             return jsonify({"error": "Invalid credentials"}), 401
 
-        uid, hashed, is_admin = result
+        uid, hashed, is_admin, role, must_change_password, auth_email = result
         if bcrypt.checkpw(password.encode(), hashed.encode()):
+            if not auth_email:
+                auth_email = dashboard_identity_email(uid)
+                db.session.execute(
+                    text("UPDATE users SET auth_email = :auth_email, updated_at = :updated_at WHERE id = :id"),
+                    {"auth_email": auth_email, "updated_at": datetime.now(timezone.utc).isoformat(), "id": uid},
+                )
+            role = role if role in {"member", "leadership", "admin"} else ("admin" if is_admin else "member")
+            session_id = None
+            if request.headers.get("x-valk-dashboard-session") == "1":
+                session_id = create_dashboard_session(
+                    db.session,
+                    uid,
+                    request.remote_addr,
+                    request.headers.get("user-agent"),
+                )
+            db.session.execute(
+                text("UPDATE users SET last_login_at = :now, updated_at = :now, role = :role, is_admin = :is_admin WHERE id = :id"),
+                {"now": datetime.now().astimezone().isoformat(), "role": role, "is_admin": int(role == "admin"), "id": uid},
+            )
+            commit_with_retry(db.session)
             return jsonify({
                 "id": uid,
                 "username": username,
                 "is_admin": bool(is_admin),
+                "role": role,
+                "must_change_password": bool(must_change_password),
+                "auth_email": auth_email,
+                "dashboard_session_id": session_id,
                 "tenant_name": tenant.get("name"),
                 "faction_name": tenant.get("faction_name"),
                 "faction_logo": tenant.get("faction_logo"),
@@ -2646,6 +2896,7 @@ def login_api():
 @app.route("/api/objectives", methods=["POST"])
 @app.route("/objectives", methods=["POST"])
 @require_api_key
+@require_capability("objectives:write", logger)
 def create_objective():
     try:
         data = request.get_json()
@@ -2839,6 +3090,7 @@ def get_objectives_streamlit():
 @app.route('/api/objectives/<int:objective_id>', methods=['DELETE'])
 @app.route('/objectives/<int:objective_id>', methods=['DELETE'])
 @require_api_key
+@require_capability("objectives:write", logger)
 def delete_objective(objective_id):
     """
     Löscht ein Objective und alle zugehörigen Child-Datensätze.
@@ -3333,6 +3585,245 @@ def system_summary(system_name):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/system-watchlist-data", methods=["POST"])
+@require_api_key
+def system_watchlist_data():
+    """Return current EDDN data and the settled 30-day BGS history in one batch."""
+    body = request.get_json(silent=True) or {}
+    requested = body.get("systems")
+    if not isinstance(requested, list):
+        return jsonify({"error": "systems must be an array"}), 400
+
+    systems = []
+    seen = set()
+    for value in requested:
+        if not isinstance(value, str):
+            return jsonify({"error": "Every system name must be a string"}), 400
+        name = value.strip()
+        key = name.casefold()
+        if not name or len(name) > 255:
+            return jsonify({"error": "Invalid system name"}), 400
+        if key not in seen:
+            systems.append(name)
+            seen.add(key)
+    if len(systems) > 100:
+        return jsonify({"error": "A watchlist supports at most 100 systems"}), 400
+
+    try:
+        history_days = int(body.get("history_days") or 30)
+    except (TypeError, ValueError):
+        return jsonify({"error": "history_days must be an integer"}), 400
+    history_days = max(1, min(history_days, 30))
+    if not systems:
+        return jsonify(
+            {
+                "data": [],
+                "facility_statistics": get_facility_type_statistics([]),
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+    eddn_db_uri = os.getenv("EDDN_DATABASE")
+    snapshot_db_uri = os.getenv(
+        "SNAPSHOT_DB_URL", "sqlite:///db/bgs_eddn_snapshots.db"
+    )
+    if not eddn_db_uri:
+        return jsonify({"error": "EDDN_DATABASE not configured in .env"}), 500
+
+    def parse_jsonish(value):
+        if isinstance(value, dict):
+            return value
+        if not isinstance(value, str) or not value.strip():
+            return {}
+        try:
+            parsed = json.loads(value)
+        except Exception:
+            try:
+                parsed = ast.literal_eval(value)
+            except Exception:
+                return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    # Keep the original system spelling in the indexed predicates. Wrapping
+    # system_name in lower() makes SQLite scan the complete EDDN and snapshot
+    # tables, which is prohibitively expensive for the multi-gigabyte history.
+    placeholders = ", ".join(f":system_{index}" for index in range(len(systems)))
+    query_params = {
+        f"system_{index}": name for index, name in enumerate(systems)
+    }
+    current_engine = create_engine(eddn_db_uri)
+    snapshot_engine = create_engine(snapshot_db_uri)
+    try:
+        with current_engine.connect() as conn:
+            current_rows = conn.execute(
+                text(
+                    "SELECT * FROM eddn_system_info "
+                    f"WHERE system_name IN ({placeholders})"
+                ),
+                query_params,
+            ).mappings().all()
+            faction_rows = conn.execute(
+                text(
+                    "SELECT * FROM eddn_faction "
+                    f"WHERE system_name IN ({placeholders})"
+                ),
+                query_params,
+            ).mappings().all()
+            conflict_rows = conn.execute(
+                text(
+                    "SELECT * FROM eddn_conflict "
+                    f"WHERE system_name IN ({placeholders})"
+                ),
+                query_params,
+            ).mappings().all()
+            powerplay_rows = conn.execute(
+                text(
+                    "SELECT * FROM eddn_powerplay "
+                    f"WHERE system_name IN ({placeholders})"
+                ),
+                query_params,
+            ).mappings().all()
+            message_ids = [
+                row.get("eddn_message_id")
+                for row in current_rows
+                if row.get("eddn_message_id")
+            ]
+            raw_messages = {}
+            if message_ids:
+                message_placeholders = ", ".join(
+                    f":message_{index}" for index in range(len(message_ids))
+                )
+                message_params = {
+                    f"message_{index}": value
+                    for index, value in enumerate(message_ids)
+                }
+                message_rows = conn.execute(
+                    text(
+                        "SELECT id, message_json FROM eddn_message "
+                        f"WHERE id IN ({message_placeholders})"
+                    ),
+                    message_params,
+                ).mappings().all()
+                raw_messages = {
+                    row["id"]: parse_jsonish(row["message_json"])
+                    for row in message_rows
+                }
+
+        history_start = (
+            datetime.now(timezone.utc) - timedelta(days=history_days + 1)
+        ).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        history_params = {**query_params, "history_start": history_start}
+        with snapshot_engine.connect() as conn:
+            snapshot_rows = conn.execute(
+                text(
+                    "SELECT system_name, ticktime, payload_json "
+                    "FROM system_tick_snapshot "
+                    f"WHERE system_name IN ({placeholders}) "
+                    "AND ticktime >= :history_start AND is_settled = 1 "
+                    "ORDER BY system_name COLLATE NOCASE, ticktime"
+                ),
+                history_params,
+            ).mappings().all()
+    finally:
+        current_engine.dispose()
+        snapshot_engine.dispose()
+
+    current_by_system = {row["system_name"].casefold(): dict(row) for row in current_rows}
+    factions_by_system = {}
+    for row in faction_rows:
+        factions_by_system.setdefault(row["system_name"].casefold(), []).append(dict(row))
+    conflicts_by_system = {}
+    for row in conflict_rows:
+        conflicts_by_system.setdefault(row["system_name"].casefold(), []).append(dict(row))
+    powerplays_by_system = {}
+    for row in powerplay_rows:
+        powerplays_by_system.setdefault(row["system_name"].casefold(), []).append(dict(row))
+
+    for system_key, info in current_by_system.items():
+        raw = raw_messages.get(info.get("eddn_message_id"), {})
+        message = raw.get("message") if isinstance(raw.get("message"), dict) else {}
+        info["economy"] = (
+            message.get("SystemEconomy_Localised")
+            or message.get("SystemEconomy")
+            or ""
+        )
+        raw_factions = {
+            str(faction.get("Name") or "").casefold(): faction
+            for faction in message.get("Factions", [])
+            if isinstance(faction, dict) and faction.get("Name")
+        }
+        for faction in factions_by_system.get(system_key, []):
+            metadata = raw_factions.get(str(faction.get("name") or "").casefold(), {})
+            faction["government"] = (
+                metadata.get("Government_Localised")
+                or metadata.get("Government")
+                or ""
+            )
+            faction["allegiance"] = metadata.get("Allegiance") or ""
+
+    history_by_system = {}
+    for snapshot in snapshot_rows:
+        payload = parse_jsonish(snapshot["payload_json"])
+        factions = []
+        for faction in payload.get("Factions", []):
+            if not isinstance(faction, dict) or not faction.get("Name"):
+                continue
+            factions.append(
+                {
+                    "name": faction.get("Name"),
+                    "influence": faction.get("Influence"),
+                }
+            )
+        history_by_system.setdefault(snapshot["system_name"].casefold(), []).append(
+            {"ticktime": snapshot["ticktime"], "factions": factions}
+        )
+
+    result = []
+    for requested_name in systems:
+        key = requested_name.casefold()
+        info = current_by_system.get(key)
+        result.append(
+            {
+                "requested_system": requested_name,
+                "available": info is not None,
+                "system_info": info or {"system_name": requested_name},
+                "factions": factions_by_system.get(key, []),
+                "conflicts": conflicts_by_system.get(key, []),
+                "powerplays": powerplays_by_system.get(key, []),
+                "history": history_by_system.get(key, []),
+            }
+        )
+    return jsonify(
+        {
+            "data": result,
+            "facility_statistics": get_facility_type_statistics(systems),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+
+
+@app.route("/api/system-facilities", methods=["GET"])
+@require_api_key
+def system_facilities():
+    """Return Spansh facilities through the persistent shared server cache."""
+    system_name = str(request.args.get("system") or "").strip()
+    if len(system_name) < 2 or len(system_name) > 255:
+        return jsonify({"error": {"code": "INVALID_SYSTEM", "message": "A valid system name is required"}}), 400
+    try:
+        payload = get_system_facilities(system_name)
+        return jsonify(
+            {
+                "data": payload,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+    except ValueError as exc:
+        return jsonify({"error": {"code": "INVALID_SYSTEM", "message": str(exc)}}), 400
+    except SpanshFacilityError as exc:
+        logger.warning("Spansh facility lookup failed for %s: %s", system_name, exc)
+        return jsonify({"error": {"code": "SPANSH_SOURCE_ERROR", "message": str(exc)}}), 502
+
+
 # FSDJump-Factions-API Endpoint
 @app.route("/api/fsdjump-factions", methods=["GET"])
 @require_api_key
@@ -3603,6 +4094,12 @@ def list_unique_factions():
         return jsonify({"error": str(e)}), 500
 
 
+# Dashboard tenant identity routes are registered after all shared decorators
+# exist. They reject legacy API-key-only requests themselves.
+register_dashboard_user_routes(app, db, require_api_key, commit_with_retry, logger)
+register_bgs_rule_routes(app, db, require_api_key, commit_with_retry, logger)
+
+
 #####################################################################
 # App-Start
 #####################################################################
@@ -3641,6 +4138,10 @@ if __name__ == "__main__":
     from fdev_tick_monitor import start_tick_watch_scheduler, first_tick_check
     first_tick_check()
     start_tick_watch_scheduler()
+
+    # Settled-snapshot BGS rule evaluation and Discord alert outbox
+    from bgs_rule_scheduler import start_bgs_rule_scheduler
+    start_bgs_rule_scheduler(TENANTS)
 
     # TODO: Multi-Tenant: Conflict Scheduler für jeden Tenant starten
     from fac_conflict_scheduler import start_fac_conflict_scheduler

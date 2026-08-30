@@ -1,0 +1,22 @@
+[Unit]
+Description=VALK Flask Server
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=valk
+Group=valk
+WorkingDirectory=/home/valk/valk
+EnvironmentFile=-/home/valk/valk/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/valk/valk/.venv/bin/python /home/valk/valk/app.py
+Restart=always
+RestartSec=10
+KillSignal=SIGINT
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

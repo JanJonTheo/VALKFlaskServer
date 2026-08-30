@@ -4,7 +4,7 @@ from apscheduler.triggers.cron import CronTrigger
 import atexit
 import requests
 from sqlalchemy import text
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -59,12 +59,12 @@ def get_engine_for_tenant(tenant):
     return create_engine(db_uri, connect_args=connect_args)
 
 
-def format_discord_summary(app=None, db=None):
+def format_discord_summary(app=None, db=None, tenant=None):
     logger = init_logger()
-    tenants = get_tenants()
+    tenants = [tenant] if tenant is not None else get_tenants()
     from sqlalchemy import text
 
-    today = datetime.utcnow().date()
+    today = datetime.now(timezone.utc).date()
     start = datetime.combine(today - timedelta(days=1), datetime.min.time())
     end = datetime.combine(today - timedelta(days=1), datetime.max.time())
     start_str = start.isoformat()
@@ -111,7 +111,10 @@ def format_discord_summary(app=None, db=None):
             "sql": '''
                    SELECT e.cmdr, mci.faction_name, SUM(LENGTH(mci.influence)) AS influence
                    FROM mission_completed_influence mci
-                            JOIN mission_completed_event mce ON mce.event_id = mci.mission_id
+                            JOIN mission_completed_event mce ON (
+                                (mci.event_id IS NOT NULL AND mce.id = mci.mission_id)
+                                OR (mci.event_id IS NULL AND mce.event_id = mci.mission_id)
+                            )
                             JOIN event e ON e.id = mce.event_id
                    WHERE e.cmdr IS NOT NULL
                        AND e.timestamp BETWEEN :start AND :end
@@ -130,11 +133,14 @@ def format_discord_summary(app=None, db=None):
             "sql": '''
                    SELECT e.cmdr, mci.faction_name, SUM(LENGTH(mci.influence)) AS influence
                    FROM mission_completed_influence mci
-                            JOIN mission_completed_event mce ON mce.event_id = mci.mission_id
+                            JOIN mission_completed_event mce ON (
+                                (mci.event_id IS NOT NULL AND mce.id = mci.mission_id)
+                                OR (mci.event_id IS NULL AND mce.event_id = mci.mission_id)
+                            )
                             JOIN event e ON e.id = mce.event_id
                    WHERE e.cmdr IS NOT NULL
                        AND e.timestamp BETWEEN :start AND :end
-                       AND mci.faction_name LIKE '%East India Company%'
+                       AND mci.faction_name LIKE :faction_name_like
                    GROUP BY e.cmdr, mci.faction_name
                    ORDER BY influence DESC, e.cmdr LIMIT 5
                    ''',
@@ -227,8 +233,18 @@ def format_discord_summary(app=None, db=None):
         with engine.connect() as conn:
             sections = []
             for title, q in base_queries.items():
+                params = {"start": start_str, "end": end_str}
+                if title == "Influence EIC":
+                    faction_name = str(tenant.get("faction_name") or "").strip()
+                    if not faction_name:
+                        logger.warning(
+                            "Kein faction_name für Tenant %s, Influence EIC wird übersprungen.",
+                            tenant.get("name"),
+                        )
+                        continue
+                    params["faction_name_like"] = f"%{faction_name}%"
                 try:
-                    rows = conn.execute(text(q["sql"]), {"start": start_str, "end": end_str}).fetchall()
+                    rows = conn.execute(text(q["sql"]), params).fetchall()
                 except Exception as e:
                     logger.error(f"Query-Fehler für {tenant.get('name')} - {title}: {e}")
                     continue

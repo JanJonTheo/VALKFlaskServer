@@ -738,7 +738,7 @@ def _create_events(data, captured_at, tickid, ticktime):
     elif activity_type == "mission_completed":
         reward = amount or 0
         event = add_id(_create_base_event(data, captured_at, tickid, ticktime, "MissionCompleted", {"Reward": reward, "Faction": faction_name, "Name": "Manual Discord Activity"}))
-        db.session.add(MissionCompletedEvent(
+        mission_completed = MissionCompletedEvent(
             event_id=event.id,
             mission_id=event.id,
             name="Manual Discord Activity",
@@ -746,9 +746,12 @@ def _create_events(data, captured_at, tickid, ticktime):
             reward=reward,
             faction=faction_name,
             awarding_faction=faction_name,
-        ))
+        )
+        db.session.add(mission_completed)
+        db.session.flush()
         db.session.add(MissionCompletedInfluence(
-            mission_id=event.id,
+            mission_id=mission_completed.id,
+            event_id=event.id,
             system=str(data["system_address"]),
             influence=_influence_string(influence),
             trend=_influence_trend(influence),
@@ -757,7 +760,15 @@ def _create_events(data, captured_at, tickid, ticktime):
     elif activity_type == "mission_failed":
         for _ in range(abs(count)):
             event = add_id(_create_base_event(data, captured_at, tickid, ticktime, "MissionFailed", {"Fine": amount or 0, "Faction": faction_name, "Name": "Manual Discord Activity"}))
-            db.session.add(MissionFailedEvent(event_id=event.id, awarding_faction=faction_name, mission_name="Manual Discord Activity", fine=amount or 0))
+            db.session.add(MissionFailedEvent(
+                event_id=event.id,
+                mission_id=event.id,
+                name="Manual Discord Activity",
+                mission_name="Manual Discord Activity",
+                faction=faction_name,
+                awarding_faction=faction_name,
+                fine=amount or 0,
+            ))
     elif activity_type == "space_cz":
         raw_cz = {"low": 0, "medium": 0, "high": 0}
         raw_cz[data["cz_type"]] = 1
@@ -1728,8 +1739,13 @@ def _delete_synthetic_events(event_ids: list):
         .all()
     ]
     if mission_completed_ids:
+        legacy_mission_links = set(mission_completed_ids + event_ids)
         db.session.query(MissionCompletedInfluence).filter(
-            MissionCompletedInfluence.mission_id.in_(mission_completed_ids)
+            MissionCompletedInfluence.event_id.in_(event_ids)
+            | (
+                MissionCompletedInfluence.event_id.is_(None)
+                & MissionCompletedInfluence.mission_id.in_(legacy_mission_links)
+            )
         ).delete(synchronize_session=False)
 
     subtype_models = (

@@ -4,7 +4,7 @@
 
 ## Project Description
 
-This project provides a RESTful API for receiving, storing, and processing Background Simulation (BGS) and Thargoid War activity data for the game Elite Dangerous. It is designed to integrate with BGS-Tally and other tools to support faction management and war tracking.
+This project provides a RESTful API for receiving, storing, and processing Background Simulation (BGS), Colonisation, and Thargoid War activity data for the game Elite Dangerous. It is designed to integrate with BGS-Tally and other tools to support faction management, colonisation tracking, and war tracking.
 
 ---
 
@@ -16,7 +16,7 @@ This backend supports multiple tenants (factions, groups, or organizations), eac
 
 ## Features
 
-- Receive BGS and Thargoid War activity data via POST and PUT requests
+- Receive BGS, Colonisation, and Thargoid War activity data via POST and PUT requests
 - Store incoming data in a tenant-specific database
 - Send notifications to Discord via tenant-specific webhooks
 - Scheduled shoutouts, tick monitoring, and conflict reporting per tenant
@@ -175,6 +175,29 @@ Manual activity webhook tenant configuration:
 ```
 
 If `manual_activity_webhook.enabled` is `false`, the submission is saved and `webhook_status` is `disabled`. If `discord_webhooks.manual_activity` is empty or missing, the submission is saved and `webhook_status` is `not_configured`.
+
+**Colonisation APIs**
+
+All Colonisation endpoints require the regular `apikey` and `apiversion` headers.
+
+- `GET /api/colonisation/targets?cmdr=JanJonTheo`
+- `GET /api/colonisation/summary?cmdr=JanJonTheo&market_id=3965326082`
+- `GET /api/colonisation/summary/text?cmdr=JanJonTheo&market_id=3965326082`
+- `GET /api/colonisation/contributions?group_by=construction&period=ct`
+- `GET /api/colonisation/constructions?status=open&period=ct`
+- `GET /api/colonisation/deliveries?cmdr=JanJonTheo&market_id=3965326082`
+- `POST /api/colonisation/deliveries`
+- `POST /api/colonisation/status`
+
+`summary` is built from received BGS-Tally journal events (`ColonisationConstructionDepot`, `ColonisationContribution`, and nearby `Docked`/`Location` events). It returns the construction target, market id, commodity rows (`Need`, `Prov`, `Rem`, `State`), totals, session delivery, central delivery total, cargo count, reason, and a preformatted text block matching the EDAPGui-ANKe Colonisation summary.
+
+`contributions` aggregates received `ColonisationContribution` journal events. Use `group_by=construction` for Construction > Cmdr or `group_by=cmdr` for Cmdr > Construction. Filters: `cmdr` or comma-separated `cmdrs`, `market_id`/`market_ids`, `construction` or comma-separated `constructions`, `period` (`ct`, `lt`, `cd`, `ld`, `cw`, `lw`, `cm`, `lm`, `2m`, `y`, `all`), or custom dates with `from=YYYY-MM-DD&to=YYYY-MM-DD`. The response includes totals, flat records, grouped rows, commodity totals, and a preformatted `text` report for Discord-style clients.
+
+`constructions` returns the latest `ColonisationConstructionDepot` snapshot per market and evaluates `status=open|finished|failed|all`. It combines required/provided/remaining commodity state with recorded `ColonisationContribution` history, including contributor Cmdrs and first/last delivery timestamps. Contribution filters (`cmdr`, `market_ids`, `constructions`, `period`, `from`, `to`) only affect recorded contributor rows; the open/finished status is based on the latest construction snapshot.
+
+Clients can post delivery records to `/api/colonisation/deliveries` with EDAPGui-compatible field names such as `DeliveryId`, `SessionId`, `CmdrName`, `TargetName`, `TargetSystem`, `TargetStation`, `ConstructionMarketID`, `CommodityKey`, `Name_Localised`, `Quantity`, and `VerificationSource`. `DeliveryId` is idempotent, so retrying the same delivery does not duplicate totals.
+
+Clients can post their latest assist state to `/api/colonisation/status` with `StatusId`, `SessionId`, `ClientId`, `CmdrName`, `TargetName`, `TargetSystem`, `TargetStation`, `ConstructionMarketID`, `Phase`, `Reason`, and `CargoCount`. The latest matching status is used by `summary` for `Reason`, `SessionDelivered`, and `cargo`.
 
 **Summary APIs**
 
@@ -406,6 +429,12 @@ docker-compose up --build
    ```bash
    python app.py
    ```
+
+### Dashboard BGS rules and AI reports
+
+The Flask process evaluates enabled dashboard BGS rules against settled snapshots every ten minutes and dispatches its Discord outbox every minute. Personal Discord webhooks require `VALK_WEBHOOK_ENCRYPTION_KEY`; use one long, deployment-specific random secret and keep it stable so existing values remain decryptable. Tenant-wide alerts reuse `discord_webhooks.bgs` from `tenant.json`.
+
+Manual BGS risk and takeover reports use `OPENAI_API_KEY` and `OPENAI_MODEL`. System facilities, ownership metadata, faction counts and coordinates are read through the existing persistent Spansh cache; Inara is not used for this feature.
 
 ## Discord
 

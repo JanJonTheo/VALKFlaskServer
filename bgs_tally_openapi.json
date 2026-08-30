@@ -1,9 +1,9 @@
 {
     "openapi": "3.0.2",
     "info": {
-        "title": "BGS-Tally v1.6.0",
-        "version": "1.6.0",
-        "description": "An API to send and receive Elite Dangerous BGS and Thargoid War activity data reported by CMDRs. This API was designed for use by the BGS-Tally EDMC plugin.",
+        "title": "BGS-Tally v1.8.0",
+        "version": "1.8.0",
+        "description": "An API to send and receive Elite Dangerous BGS, Colonisation and Thargoid War activity data reported by CMDRs. This API was designed for use by the BGS-Tally EDMC plugin.",
         "contact": {
             "name": "Aussi",
             "url": "https://github.com/aussig/BGS-Tally"
@@ -902,6 +902,10 @@
                         "enum": [
                             "ApproachSettlement",
                             "CarrierJump",
+                            "ColonisationBeaconDeployed",
+                            "ColonisationConstructionDepot",
+                            "ColonisationContribution",
+                            "ColonisationSystemClaim",
                             "CommitCrime",
                             "Died",
                             "Docked",

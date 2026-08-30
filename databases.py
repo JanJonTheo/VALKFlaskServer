@@ -10,13 +10,15 @@ from sqlalchemy.engine import make_url
 from models import (
     db,
     System, Faction,
-    MissionCompletedEvent,
+    MissionCompletedEvent, MissionCompletedInfluence, MissionFailedEvent,
     MarketBuyEvent, MarketSellEvent,
     RedeemVoucherEvent,
     MultiSellExplorationDataEvent, SellExplorationDataEvent,
     ManualActivitySubmission,
+    ColonisationAssistStatus, ColonisationDelivery,
     BGSEvalRun, BGSEvalResult
 )
+from dashboard_users import ensure_dashboard_schema
 
 # -----------------------------------------------------------------------------
 # Tenant-Konfiguration
@@ -152,6 +154,49 @@ def ensure_manual_activity_submission_table_and_indexes(conn, db_uri: str):
         logger.warning(f"ensure_manual_activity_submission_table_and_indexes failed for {db_uri}: {e}")
 
 
+def ensure_colonisation_tables_and_indexes(conn, db_uri: str):
+    """
+    Ensure central Colonisation delivery/status logging tables and key indexes exist.
+    """
+    try:
+        db.Model.metadata.create_all(bind=conn)
+        conn.execute(sqlalchemy.text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_colonisation_delivery_delivery_id "
+            "ON colonisation_delivery(delivery_id);"
+        ))
+        conn.execute(sqlalchemy.text(
+            "CREATE INDEX IF NOT EXISTS idx_colonisation_delivery_cmdr "
+            "ON colonisation_delivery(cmdr);"
+        ))
+        conn.execute(sqlalchemy.text(
+            "CREATE INDEX IF NOT EXISTS idx_colonisation_delivery_market_id "
+            "ON colonisation_delivery(market_id);"
+        ))
+        conn.execute(sqlalchemy.text(
+            "CREATE INDEX IF NOT EXISTS idx_colonisation_delivery_market_cmdr "
+            "ON colonisation_delivery(market_id, cmdr);"
+        ))
+        conn.execute(sqlalchemy.text(
+            "CREATE INDEX IF NOT EXISTS idx_colonisation_delivery_market_session "
+            "ON colonisation_delivery(market_id, session_id);"
+        ))
+        conn.execute(sqlalchemy.text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_colonisation_status_status_id "
+            "ON colonisation_assist_status(status_id);"
+        ))
+        conn.execute(sqlalchemy.text(
+            "CREATE INDEX IF NOT EXISTS idx_colonisation_status_market_cmdr "
+            "ON colonisation_assist_status(market_id, cmdr);"
+        ))
+        conn.execute(sqlalchemy.text(
+            "CREATE INDEX IF NOT EXISTS idx_colonisation_status_market_updated "
+            "ON colonisation_assist_status(market_id, updated_at);"
+        ))
+        logger.info(f"Tabellen/Indizes 'colonisation_*' sichergestellt fuer Tenant: {db_uri}")
+    except Exception as e:
+        logger.warning(f"ensure_colonisation_tables_and_indexes failed for {db_uri}: {e}")
+
+
 # -----------------------------------------------------------------------------
 # Initialisierung (nur DB-Datei + minimal create_all für neue SQLite DBs)
 # -----------------------------------------------------------------------------
@@ -212,7 +257,10 @@ def update_all_tenant_databases():
             # 4) Ensure manual activity submissions
             ensure_manual_activity_submission_table_and_indexes(conn, db_uri)
 
-            # 5) SQLite: missing columns via ALTER TABLE
+            # 5) Ensure central Colonisation delivery/status logging
+            ensure_colonisation_tables_and_indexes(conn, db_uri)
+
+            # 6) SQLite: missing columns via ALTER TABLE
             if url.drivername == "sqlite":
                 # --- system ---
                 sys_existing = _get_existing_columns(engine, "system")
@@ -259,6 +307,54 @@ def update_all_tenant_databases():
                                 )
                 except Exception as e:
                     logger.warning(f"mission_completed_event column ensure skipped for {db_uri}: {e}")
+
+                # --- mission_completed_influence ---
+                try:
+                    mci_existing = _get_existing_columns(engine, "mission_completed_influence")
+                    mci_model = _get_model_columns(MissionCompletedInfluence)
+                    for col_name, col_obj in mci_model.items():
+                        if col_name not in mci_existing:
+                            col_type = str(col_obj.type)
+                            alter_sql = f'ALTER TABLE mission_completed_influence ADD COLUMN {col_name} {col_type}'
+                            try:
+                                conn.execute(sqlalchemy.text(alter_sql))
+                                logger.info(
+                                    f"Spalte '{col_name}' zu Tabelle 'mission_completed_influence' ergänzt für Tenant: {db_uri}"
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    f"Fehler beim Ergänzen von Spalte '{col_name}' in 'mission_completed_influence': {e}"
+                                )
+                    conn.execute(sqlalchemy.text(
+                        "CREATE INDEX IF NOT EXISTS idx_mission_completed_influence_mission_id "
+                        "ON mission_completed_influence(mission_id);"
+                    ))
+                    conn.execute(sqlalchemy.text(
+                        "CREATE INDEX IF NOT EXISTS idx_mission_completed_influence_event_id "
+                        "ON mission_completed_influence(event_id);"
+                    ))
+                except Exception as e:
+                    logger.warning(f"mission_completed_influence column ensure skipped for {db_uri}: {e}")
+
+                # --- mission_failed_event ---
+                try:
+                    mfe_existing = _get_existing_columns(engine, "mission_failed_event")
+                    mfe_model = _get_model_columns(MissionFailedEvent)
+                    for col_name, col_obj in mfe_model.items():
+                        if col_name not in mfe_existing:
+                            col_type = str(col_obj.type)
+                            alter_sql = f'ALTER TABLE mission_failed_event ADD COLUMN {col_name} {col_type}'
+                            try:
+                                conn.execute(sqlalchemy.text(alter_sql))
+                                logger.info(
+                                    f"Spalte '{col_name}' zu Tabelle 'mission_failed_event' ergänzt für Tenant: {db_uri}"
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    f"Fehler beim Ergänzen von Spalte '{col_name}' in 'mission_failed_event': {e}"
+                                )
+                except Exception as e:
+                    logger.warning(f"mission_failed_event column ensure skipped for {db_uri}: {e}")
 
                 # --- market_buy_event ---
                 try:
@@ -367,6 +463,10 @@ def update_all_tenant_databases():
                                 )
                 except Exception as e:
                     logger.warning(f"manual_activity_submission column ensure skipped for {db_uri}: {e}")
+
+        # Dashboard identity/preference tables deliberately live in each
+        # tenant database and are maintained idempotently.
+        ensure_dashboard_schema(engine)
 
         logger.info(f"Tenant-DB aktualisiert: {db_uri}")
 

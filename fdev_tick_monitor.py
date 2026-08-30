@@ -3,7 +3,7 @@ import logging
 import atexit
 import os
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -21,6 +21,17 @@ with open(TENANT_CONFIG_PATH, "r", encoding="utf-8") as f:
 TICK_STATE_PATH = os.path.join(os.path.dirname(__file__), "last_tick.json")
 
 last_tick = {"value": None}
+
+
+def refresh_spansh_watchlist_cache() -> None:
+    """Reconcile all tenant watchlist systems after the daily BGS tick."""
+    try:
+        from spansh_facility_cache import refresh_tenant_watchlists
+
+        result = refresh_tenant_watchlists(TENANTS, force=True)
+        logging.info("[SpanshCache] Tick reconciliation completed: %s", result)
+    except Exception as exc:
+        logging.exception("[SpanshCache] Tick reconciliation failed: %s", exc)
 
 
 def _ensure_parent_dir(path: str) -> None:
@@ -258,6 +269,16 @@ def start_tick_watch_scheduler():
 
                 # Persist first so other processes immediately see the new tick
                 persist_tick_to_file(new_tick)
+
+                # Spansh aggregates the EDDN stream. Give it time to ingest the
+                # new tick before reconciling all distinct user watchlists.
+                scheduler.add_job(
+                    refresh_spansh_watchlist_cache,
+                    "date",
+                    run_date=datetime.utcnow() + timedelta(minutes=20),
+                    id="spansh-watchlist-tick-refresh",
+                    replace_existing=True,
+                )
 
                 # Send regular discord tick notice if requested
                 if send_discord_notice:

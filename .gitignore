@@ -105,6 +105,9 @@ celerybeat.pid
 
 # Environments
 .env
+flask.env
+.streamlit/secrets.toml
+tenant.json
 .venv
 env/
 venv/
@@ -152,6 +155,9 @@ Desktop.ini
 
 # SQLite database files
 *.db
+*.db-shm
+*.db-wal
+*.db-journal
 *.sqlite
 *.sqlite3
 

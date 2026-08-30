@@ -81,7 +81,11 @@ class MissionCompletedEvent(db.Model):
 
 class MissionCompletedInfluence(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    mission_id = db.Column(db.Integer, db.ForeignKey('mission_completed_event.id'), nullable=False)
+    mission_id = db.Column(db.Integer, db.ForeignKey('mission_completed_event.id'), nullable=False, index=True)
+    # New rows use the normalized mission_completed_event.id relation above.
+    # event_id also marks the corrected link format so legacy rows, which stored
+    # Event.id in mission_id, can still be read without rewriting history.
+    event_id = db.Column(db.Integer, db.ForeignKey('event.id'), nullable=True, index=True)
     system = db.Column(db.String(128))
     influence = db.Column(db.String(8))
     trend = db.Column(db.String(32))
@@ -145,6 +149,9 @@ class FactionKillBondEvent(db.Model):
 class MissionFailedEvent(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     event_id = db.Column(db.Integer, db.ForeignKey('event.id'), nullable=False)
+    mission_id = db.Column(db.Integer)
+    name = db.Column(db.String(128))
+    faction = db.Column(db.String(128))
     mission_name = db.Column(db.String(128))
     awarding_faction = db.Column(db.String(128))
     fine = db.Column(db.Integer)
@@ -306,6 +313,69 @@ class ManualActivitySubmission(db.Model):
     webhook_message_id = db.Column(db.String(64))
     webhook_error = db.Column(db.Text)
     webhook_posted_at = db.Column(db.String(64))
+
+class ColonisationDelivery(db.Model):
+    __tablename__ = "colonisation_delivery"
+
+    id = db.Column(db.Integer, primary_key=True)
+    delivery_id = db.Column(db.String(128), unique=True, nullable=False, index=True)
+    batch_id = db.Column(db.String(128))
+    session_id = db.Column(db.String(128), index=True)
+
+    client_id = db.Column(db.String(128), index=True)
+    client_name = db.Column(db.String(128))
+    cmdr = db.Column(db.String(64), nullable=False, index=True)
+
+    target_name = db.Column(db.String(128), index=True)
+    target_system = db.Column(db.String(128), index=True)
+    target_station = db.Column(db.String(128))
+    market_id = db.Column(db.BigInteger, nullable=False, index=True)
+
+    commodity_key = db.Column(db.String(128), nullable=False, index=True)
+    commodity = db.Column(db.String(128), nullable=False)
+    quantity = db.Column(db.Integer, nullable=False)
+
+    source = db.Column(db.String(64))
+    verification_source = db.Column(db.String(64))
+    event_id = db.Column(db.Integer)
+    note = db.Column(db.Text)
+
+    created_at = db.Column(db.String(64), nullable=False, index=True)
+    received_at = db.Column(db.String(64), nullable=False)
+    payload_json = db.Column(db.Text)
+
+    __table_args__ = (
+        db.Index("idx_colonisation_delivery_market_cmdr", "market_id", "cmdr"),
+        db.Index("idx_colonisation_delivery_market_session", "market_id", "session_id"),
+    )
+
+class ColonisationAssistStatus(db.Model):
+    __tablename__ = "colonisation_assist_status"
+
+    id = db.Column(db.Integer, primary_key=True)
+    status_id = db.Column(db.String(128), unique=True, nullable=False, index=True)
+    session_id = db.Column(db.String(128), index=True)
+
+    client_id = db.Column(db.String(128), index=True)
+    client_name = db.Column(db.String(128))
+    cmdr = db.Column(db.String(64), nullable=False, index=True)
+
+    target_name = db.Column(db.String(128), index=True)
+    target_system = db.Column(db.String(128), index=True)
+    target_station = db.Column(db.String(128))
+    market_id = db.Column(db.BigInteger, nullable=False, index=True)
+
+    phase = db.Column(db.String(64))
+    reason = db.Column(db.Text)
+    cargo_count = db.Column(db.Integer)
+    updated_at = db.Column(db.String(64), nullable=False, index=True)
+    received_at = db.Column(db.String(64), nullable=False)
+    payload_json = db.Column(db.Text)
+
+    __table_args__ = (
+        db.Index("idx_colonisation_status_market_cmdr", "market_id", "cmdr"),
+        db.Index("idx_colonisation_status_market_updated", "market_id", "updated_at"),
+    )
 
 class ProtectedFaction(db.Model):
     __tablename__ = "protected_faction"

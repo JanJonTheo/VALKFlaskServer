@@ -758,6 +758,29 @@ class RuleApiPermissionTest(unittest.TestCase):
         self.assertEqual(visible.status_code, 200)
         self.assertEqual({rule["owner_scope"] for rule in visible.get_json()["data"]}, {"personal", "tenant"})
 
+    def test_bgs_ai_accepts_systems_outside_the_tenant_watchlist(self):
+        source = {
+            "source_ticktime": "2026-09-02T12:00:00Z",
+            "spansh": {"cached_at": "2026-09-02T12:01:00Z"},
+        }
+        with patch("bgs_rules._build_ai_source", return_value=source) as build_source, patch(
+            "bgs_rules._call_openai",
+            return_value=({"summary": "Global system analyzed."}, "test-model"),
+        ):
+            response = self.client.post(
+                "/api/dashboard/bgs/ai-reports/analyze",
+                headers={"authorization": "Bearer lead"},
+                json={"system_name": "Global System", "report_type": "risk"},
+            )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.get_json()["data"]["system_name"], "Global System")
+        build_source.assert_called_once_with(
+            "Global System",
+            "risk",
+            "Test Faction",
+        )
+
     def test_catalog_application_is_atomic_scoped_and_idempotent(self):
         catalog = self.client.get(
             "/api/dashboard/bgs/rule-templates",
@@ -803,6 +826,78 @@ class RuleApiPermissionTest(unittest.TestCase):
         )
         self.assertEqual(global_applied.status_code, 201)
         self.assertEqual(global_applied.get_json()["data"]["owner_scope"], "tenant")
+
+    def test_personal_webhook_can_be_saved_displayed_tested_and_removed(self):
+        webhook = "https://discord.com/api/webhooks/123456/personal_token"
+        headers = {"authorization": "Bearer member"}
+        with patch.dict(
+            os.environ,
+            {"VALK_WEBHOOK_ENCRYPTION_KEY": "test-personal-webhook-key"},
+        ):
+            initial = self.client.get(
+                "/api/account/discord-webhook",
+                headers=headers,
+            )
+            self.assertEqual(initial.status_code, 200)
+            self.assertIsNone(initial.get_json()["webhook_url"])
+
+            saved = self.client.put(
+                "/api/account/discord-webhook",
+                headers=headers,
+                json={"webhook_url": webhook},
+            )
+            self.assertEqual(saved.status_code, 200)
+            self.assertEqual(saved.get_json()["webhook_url"], webhook)
+
+            ciphertext = self.session.execute(
+                text(
+                    "SELECT discord_webhook_ciphertext FROM users WHERE id = 1"
+                )
+            ).scalar_one()
+            self.assertNotIn("personal_token", ciphertext)
+
+            displayed = self.client.get(
+                "/api/account/discord-webhook",
+                headers=headers,
+            )
+            self.assertTrue(displayed.get_json()["configured"])
+            self.assertEqual(displayed.get_json()["webhook_url"], webhook)
+
+            with patch("bgs_rules.requests.post") as post:
+                post.return_value = SimpleNamespace(status_code=204)
+                tested = self.client.post(
+                    "/api/account/discord-webhook/test",
+                    headers=headers,
+                )
+            self.assertEqual(tested.status_code, 200)
+            self.assertEqual(post.call_args.args[0], webhook)
+            self.assertEqual(
+                post.call_args.kwargs["json"]["allowed_mentions"],
+                {"parse": []},
+            )
+            self.assertFalse(post.call_args.kwargs["allow_redirects"])
+
+            removed = self.client.delete(
+                "/api/account/discord-webhook",
+                headers=headers,
+            )
+            self.assertEqual(removed.status_code, 200)
+            self.assertIsNone(removed.get_json()["webhook_url"])
+
+    def test_personal_webhook_save_reports_missing_encryption_key(self):
+        with patch.dict(os.environ, {"VALK_WEBHOOK_ENCRYPTION_KEY": ""}):
+            response = self.client.put(
+                "/api/account/discord-webhook",
+                headers={"authorization": "Bearer member"},
+                json={
+                    "webhook_url": "https://discord.com/api/webhooks/123456/token"
+                },
+            )
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(
+            response.get_json()["error"]["code"],
+            "WEBHOOK_ENCRYPTION_UNAVAILABLE",
+        )
 
     def test_template_update_is_versioned_and_package_sync_is_explicit(self):
         template = next(item for item in self.client.get(

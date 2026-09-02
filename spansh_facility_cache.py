@@ -80,6 +80,8 @@ def _connect() -> sqlite3.Connection:
             system_id64 TEXT NOT NULL,
             market_id TEXT,
             name TEXT NOT NULL,
+            carrier_name TEXT,
+            carrier_owner TEXT,
             facility_type TEXT NOT NULL,
             is_settlement INTEGER NOT NULL DEFAULT 0,
             body TEXT,
@@ -123,6 +125,14 @@ def _connect() -> sqlite3.Connection:
         if name not in existing_columns:
             connection.execute(
                 f"ALTER TABLE spansh_system_cache ADD COLUMN {name} {definition}"
+            )
+    facility_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(spansh_facility)")
+    }
+    for name in ("carrier_name", "carrier_owner"):
+        if name not in facility_columns:
+            connection.execute(
+                f"ALTER TABLE spansh_facility ADD COLUMN {name} TEXT"
             )
     connection.commit()
     return connection
@@ -217,6 +227,23 @@ def _normalise_facility(
     primary_economy, secondary_economy = _economies(station)
     market_id = _clean_text(station.get("id") or station.get("marketId"))
     name = _clean_text(station.get("name")) or "Unnamed facility"
+    carrier_name = _clean_text(
+        station.get("carrierName") or station.get("carrier_name")
+    )
+    carrier_owner = next(
+        (
+            _clean_text(station.get(key))
+            for key in (
+                "carrierOwner",
+                "carrier_owner",
+                "ownerName",
+                "commanderName",
+                "cmdrName",
+            )
+            if isinstance(station.get(key), str) and _clean_text(station.get(key))
+        ),
+        "",
+    )
     body_name = _clean_text((body or {}).get("name"))
     body_id64 = _clean_text((body or {}).get("id64"))
     facility_id = market_id or f"{system_id64}:{body_id64}:{name.casefold()}"
@@ -229,6 +256,8 @@ def _normalise_facility(
         "system_id64": system_id64,
         "market_id": market_id,
         "name": name,
+        "carrier_name": carrier_name,
+        "carrier_owner": carrier_owner,
         "facility_type": facility_type,
         "is_settlement": int("settlement" in facility_type.casefold()),
         "body": body_name,
@@ -322,6 +351,8 @@ def _cached_payload(connection: sqlite3.Connection, system_key: str) -> dict[str
                 "id": row["facility_id"],
                 "market_id": row["market_id"] or "",
                 "name": row["name"],
+                "carrier_name": row["carrier_name"] or "",
+                "carrier_owner": row["carrier_owner"] or "",
                 "type": row["facility_type"],
                 "is_settlement": bool(row["is_settlement"]),
                 "distance_to_arrival": row["distance_to_arrival"],
@@ -405,12 +436,14 @@ def _store_dump(
         connection.execute("DELETE FROM spansh_facility WHERE system_key = ?", (system_key,))
         connection.executemany(
             "INSERT INTO spansh_facility(facility_id, system_key, system_id64, "
-            "market_id, name, facility_type, is_settlement, body, body_id64, "
+            "market_id, name, carrier_name, carrier_owner, facility_type, "
+            "is_settlement, body, body_id64, "
             "distance_to_arrival, latitude, longitude, controlling_faction, "
             "allegiance, government, primary_economy, secondary_economy, "
             "services_json, have_market, have_shipyard, have_outfitting, updated_at) "
             "VALUES (:facility_id, :system_key, :system_id64, :market_id, :name, "
-            ":facility_type, :is_settlement, :body, :body_id64, :distance_to_arrival, "
+            ":carrier_name, :carrier_owner, :facility_type, :is_settlement, "
+            ":body, :body_id64, :distance_to_arrival, "
             ":latitude, :longitude, :controlling_faction, :allegiance, :government, "
             ":primary_economy, :secondary_economy, :services_json, :have_market, "
             ":have_shipyard, :have_outfitting, :updated_at)",

@@ -78,6 +78,12 @@ class SpanshFacilityCacheTest(unittest.TestCase):
                             "name": "Test Dodec",
                             "type": "Dodecagonal Agricultural Station",
                         },
+                        {
+                            "id": 1006,
+                            "name": "G4K-N8L",
+                            "carrierName": "[VALK] Graf Zeppelin",
+                            "type": "Drake-Class Carrier",
+                        },
                     ],
                     "bodies": [
                         {
@@ -107,7 +113,7 @@ class SpanshFacilityCacheTest(unittest.TestCase):
         self.assertEqual(first["cache_status"], "MISS")
         self.assertEqual(second["cache_status"], "HIT")
         self.assertEqual(request.call_count, 2)
-        self.assertEqual(len(first["stations"]), 5)
+        self.assertEqual(len(first["stations"]), 6)
         self.assertEqual(first["coordinates"], {"x": 10.5, "y": -2.0, "z": 44.25})
         self.assertEqual(first["faction_count"], 1)
         self.assertEqual(first["factions"][0]["name"], "Test Faction")
@@ -116,6 +122,7 @@ class SpanshFacilityCacheTest(unittest.TestCase):
             {
                 "Coriolis Starport": 1,
                 "Dodecagonal Agricultural Station": 1,
+                "Drake-Class Carrier": 1,
                 "Ocellus Starport": 1,
                 "Orbis Starport": 1,
                 "Settlement": 1,
@@ -124,6 +131,12 @@ class SpanshFacilityCacheTest(unittest.TestCase):
         settlement = next(item for item in first["stations"] if item["is_settlement"])
         self.assertEqual(settlement["body"], "Test System 1")
         self.assertEqual(settlement["latitude"], 1.5)
+        carrier = next(
+            item for item in first["stations"] if item["type"] == "Drake-Class Carrier"
+        )
+        self.assertEqual(carrier["name"], "G4K-N8L")
+        self.assertEqual(carrier["carrier_name"], "[VALK] Graf Zeppelin")
+        self.assertEqual(carrier["carrier_owner"], "")
         self.assertEqual(
             cache.get_facility_type_statistics(
                 ["Test System", "test system", "Missing System"]
@@ -149,7 +162,7 @@ class SpanshFacilityCacheTest(unittest.TestCase):
         self.assertEqual(result["cache_status"], "STALE")
         self.assertTrue(result["stale"])
         self.assertIn("offline", result["warning"])
-        self.assertEqual(len(result["stations"]), 5)
+        self.assertEqual(len(result["stations"]), 6)
 
     def test_watchlist_collection_finds_runtime_parent_database(self):
         runtime_root = Path(self.tempdir.name)

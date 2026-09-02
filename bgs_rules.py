@@ -1957,9 +1957,11 @@ def register_bgs_rule_routes(app, db, require_api_key, commit_with_retry, logger
             {"id": user_id},
         ).mappings().one()
         if request.method == "GET":
+            webhook = decrypt_webhook(row["discord_webhook_ciphertext"])
             return jsonify(
                 {
-                    "configured": decrypt_webhook(row["discord_webhook_ciphertext"]) is not None,
+                    "configured": webhook is not None,
+                    "webhook_url": webhook,
                     "updated_at": row["discord_webhook_updated_at"],
                     "encryption_configured": _webhook_cipher() is not None,
                 }
@@ -1970,9 +1972,20 @@ def register_bgs_rule_routes(app, db, require_api_key, commit_with_retry, logger
                 {"id": user_id},
             )
             commit_with_retry(db.session)
-            return jsonify({"ok": True})
+            return jsonify(
+                {
+                    "ok": True,
+                    "configured": False,
+                    "webhook_url": None,
+                    "updated_at": None,
+                    "encryption_configured": _webhook_cipher() is not None,
+                }
+            )
         try:
-            encrypted = encrypt_webhook((request.get_json(silent=True) or {}).get("webhook_url"))
+            webhook = validate_discord_webhook(
+                (request.get_json(silent=True) or {}).get("webhook_url")
+            )
+            encrypted = encrypt_webhook(webhook)
         except ValueError as exc:
             return _error("INVALID_WEBHOOK", str(exc), 400)
         except RuntimeError as exc:
@@ -1983,7 +1996,15 @@ def register_bgs_rule_routes(app, db, require_api_key, commit_with_retry, logger
             {"ciphertext": encrypted, "now": now, "id": user_id},
         )
         commit_with_retry(db.session)
-        return jsonify({"ok": True, "configured": True, "updated_at": now})
+        return jsonify(
+            {
+                "ok": True,
+                "configured": True,
+                "webhook_url": webhook,
+                "updated_at": now,
+                "encryption_configured": True,
+            }
+        )
 
     @app.route("/api/account/discord-webhook/test", methods=["POST"])
     @require_api_key
@@ -1999,15 +2020,21 @@ def register_bgs_rule_routes(app, db, require_api_key, commit_with_retry, logger
         try:
             response = requests.post(
                 webhook,
-                json={"content": f"✅ VALK dashboard test for {g.dashboard_user['username']}"},
+                json={
+                    "content": f"✅ VALK dashboard test for {g.dashboard_user['username']}",
+                    "allowed_mentions": {"parse": []},
+                },
                 timeout=8,
+                allow_redirects=False,
             )
             if response.status_code not in (200, 204):
                 raise RuntimeError(f"Discord returned HTTP {response.status_code}")
-        except requests.RequestException as exc:
-            return _error("WEBHOOK_DELIVERY_FAILED", str(exc), 502)
-        except RuntimeError as exc:
-            return _error("WEBHOOK_DELIVERY_FAILED", str(exc), 502)
+        except (requests.RequestException, RuntimeError):
+            return _error(
+                "WEBHOOK_DELIVERY_FAILED",
+                "Discord did not accept the personal webhook test message",
+                502,
+            )
         return jsonify({"ok": True})
 
     @app.route("/api/dashboard/bgs/ai-reports", methods=["GET"])
@@ -2065,9 +2092,6 @@ def register_bgs_rule_routes(app, db, require_api_key, commit_with_retry, logger
         report_type = str(data.get("report_type") or "")
         if not 2 <= len(system_name) <= 255 or report_type not in REPORT_TYPES:
             return _error("INVALID_AI_REQUEST", "A valid system and report type are required", 400)
-        allowed = {value.casefold() for value in watchlist_systems(db.session, None)}
-        if system_name.casefold() not in allowed:
-            return _error("SYSTEM_NOT_WATCHED", "AI reports are limited to tenant watchlist systems", 400)
         tenant_faction = str(g.tenant.get("faction_name") or "").strip()
         try:
             source = _build_ai_source(system_name, report_type, tenant_faction)

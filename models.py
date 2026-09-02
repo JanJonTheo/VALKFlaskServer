@@ -1,8 +1,15 @@
+import json
+
 from flask_sqlalchemy import SQLAlchemy
 
 db = SQLAlchemy()
 
 class Event(db.Model):
+    __table_args__ = (
+        db.Index("idx_event_timestamp", "timestamp"),
+        db.Index("idx_event_tickid_timestamp", "tickid", "timestamp"),
+    )
+
     id = db.Column(db.Integer, primary_key=True)
     event = db.Column(db.String(64), nullable=False)
     timestamp = db.Column(db.String(64), nullable=False)
@@ -23,7 +30,7 @@ class Event(db.Model):
             cmdr=data.get('cmdr'),
             starsystem=data.get('StarSystem'),
             systemaddress=data.get('SystemAddress'),
-            raw_json=str(data)
+            raw_json=json.dumps(data, ensure_ascii=False, separators=(",", ":"))
         )
 
 class MarketBuyEvent(db.Model):
@@ -157,6 +164,10 @@ class MissionFailedEvent(db.Model):
     fine = db.Column(db.Integer)
 
 class MultiSellExplorationDataEvent(db.Model):
+    __table_args__ = (
+        db.Index("idx_multi_sell_exploration_event_id", "event_id"),
+    )
+
     id = db.Column(db.Integer, primary_key=True)
     event_id = db.Column(db.Integer, db.ForeignKey('event.id'), nullable=False)
     total_earnings = db.Column(db.Integer)
@@ -169,6 +180,10 @@ class MultiSellExplorationDataEvent(db.Model):
     systemaddress = db.Column(db.BigInteger)   # SystemAddress
 
 class RedeemVoucherEvent(db.Model):
+    __table_args__ = (
+        db.Index("idx_redeem_voucher_type_event_id", "type", "event_id"),
+    )
+
     id = db.Column(db.Integer, primary_key=True)
     event_id = db.Column(db.Integer, db.ForeignKey('event.id'), nullable=False)
     amount = db.Column(db.Integer)
@@ -181,6 +196,10 @@ class RedeemVoucherEvent(db.Model):
     systemaddress = db.Column(db.BigInteger)    # SystemAddress
 
 class SellExplorationDataEvent(db.Model):
+    __table_args__ = (
+        db.Index("idx_sell_exploration_event_id", "event_id"),
+    )
+
     id = db.Column(db.Integer, primary_key=True)
     event_id = db.Column(db.Integer, db.ForeignKey('event.id'), nullable=False)
     earnings = db.Column(db.Integer)

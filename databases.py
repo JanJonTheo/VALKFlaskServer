@@ -19,6 +19,12 @@ from models import (
     BGSEvalRun, BGSEvalResult
 )
 from dashboard_users import ensure_dashboard_schema
+from redeem_voucher import (
+    encode_factions,
+    normalize_redeem_voucher_payload,
+    parse_event_payload,
+    redeem_voucher_factions,
+)
 
 # -----------------------------------------------------------------------------
 # Tenant-Konfiguration
@@ -195,6 +201,101 @@ def ensure_colonisation_tables_and_indexes(conn, db_uri: str):
         logger.info(f"Tabellen/Indizes 'colonisation_*' sichergestellt fuer Tenant: {db_uri}")
     except Exception as e:
         logger.warning(f"ensure_colonisation_tables_and_indexes failed for {db_uri}: {e}")
+
+
+def ensure_activity_query_indexes(conn, db_uri: str):
+    """Ensure indexes used by tick-scoped Dashboard V2/V3 evaluations."""
+    statements = (
+        "CREATE INDEX IF NOT EXISTS idx_event_timestamp ON event(timestamp)",
+        "CREATE INDEX IF NOT EXISTS idx_event_tickid_timestamp ON event(tickid, timestamp)",
+        "CREATE INDEX IF NOT EXISTS idx_redeem_voucher_type_event_id ON redeem_voucher_event(type, event_id)",
+        "CREATE INDEX IF NOT EXISTS idx_sell_exploration_event_id ON sell_exploration_data_event(event_id)",
+        "CREATE INDEX IF NOT EXISTS idx_multi_sell_exploration_event_id ON multi_sell_exploration_data_event(event_id)",
+    )
+    try:
+        for statement in statements:
+            conn.execute(sqlalchemy.text(statement))
+        logger.info(f"Activity query indexes ensured for tenant: {db_uri}")
+    except Exception as e:
+        logger.warning(f"ensure_activity_query_indexes failed for {db_uri}: {e}")
+
+
+def backfill_redeem_voucher_details(conn, db_uri: str = "") -> dict[str, int]:
+    """Repair only voucher details that can be derived losslessly from stored data."""
+    stats = {"scanned": 0, "factions": 0, "faction": 0, "raw_json": 0}
+    try:
+        rows = conn.execute(sqlalchemy.text(
+            """
+            SELECT
+                rv.id AS redeem_id,
+                rv.amount,
+                rv.type,
+                rv.faction,
+                rv.factions,
+                e.id AS event_id,
+                e.raw_json
+            FROM redeem_voucher_event rv
+            JOIN event e ON e.id = rv.event_id
+            WHERE (rv.factions IS NULL OR TRIM(rv.factions) = '')
+               OR (rv.faction IS NULL OR TRIM(rv.faction) = '')
+               OR (
+                    rv.factions IS NOT NULL
+                    AND TRIM(rv.factions) != ''
+                    AND (e.raw_json IS NULL OR e.raw_json NOT LIKE '%Factions%')
+               )
+            """
+        )).mappings().all()
+
+        for row in rows:
+            stats["scanned"] += 1
+            payload = parse_event_payload(row.get("raw_json")) or {}
+            raw_had_factions = bool(redeem_voucher_factions({
+                "Factions": payload.get("Factions"),
+            }))
+            if not raw_had_factions and str(row.get("factions") or "").strip():
+                try:
+                    stored_factions = json.loads(row["factions"])
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    stored_factions = None
+                if isinstance(stored_factions, list) and stored_factions:
+                    payload["Factions"] = stored_factions
+            payload.setdefault("event", "RedeemVoucher")
+            payload.setdefault("Type", row.get("type"))
+            payload.setdefault("Amount", row.get("amount"))
+            if row.get("faction"):
+                payload.setdefault("Faction", row.get("faction"))
+
+            normalized, factions, primary_faction = normalize_redeem_voucher_payload(payload)
+            updates = {}
+            if not str(row.get("factions") or "").strip() and factions:
+                updates["factions"] = encode_factions(factions)
+                stats["factions"] += 1
+            if not str(row.get("faction") or "").strip() and primary_faction:
+                updates["faction"] = primary_faction
+                stats["faction"] += 1
+
+            if updates:
+                updates["redeem_id"] = row["redeem_id"]
+                assignments = ", ".join(f"{name} = :{name}" for name in updates if name != "redeem_id")
+                conn.execute(
+                    sqlalchemy.text(f"UPDATE redeem_voucher_event SET {assignments} WHERE id = :redeem_id"),
+                    updates,
+                )
+
+            if payload and factions and not raw_had_factions:
+                conn.execute(
+                    sqlalchemy.text("UPDATE event SET raw_json = :raw_json WHERE id = :event_id"),
+                    {
+                        "event_id": row["event_id"],
+                        "raw_json": json.dumps(normalized, ensure_ascii=False, separators=(",", ":")),
+                    },
+                )
+                stats["raw_json"] += 1
+
+        logger.info(f"RedeemVoucher backfill for {db_uri}: {stats}")
+    except Exception as e:
+        logger.warning(f"RedeemVoucher backfill skipped for {db_uri}: {e}")
+    return stats
 
 
 # -----------------------------------------------------------------------------
@@ -464,6 +565,9 @@ def update_all_tenant_databases():
                 except Exception as e:
                     logger.warning(f"manual_activity_submission column ensure skipped for {db_uri}: {e}")
 
+                ensure_activity_query_indexes(conn, db_uri)
+                backfill_redeem_voucher_details(conn, db_uri)
+
         # Dashboard identity/preference tables deliberately live in each
         # tenant database and are maintained idempotently.
         ensure_dashboard_schema(engine)
@@ -522,8 +626,12 @@ def ensure_eddn_indexes():
             return
 
         engine = create_engine(eddn_db_uri)
-        with engine.connect() as conn:
+        with engine.begin() as conn:
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_esi_system_name ON eddn_system_info(system_name);"))
-            logger.info("EDDN indexes ensured (idx_esi_system_name).")
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS idx_esi_system_name_nocase "
+                "ON eddn_system_info(system_name COLLATE NOCASE);"
+            ))
+            logger.info("EDDN indexes ensured (exact and NOCASE system_name).")
     except Exception as e:
         logger.error(f"ensure_eddn_indexes failed: {e}")

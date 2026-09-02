@@ -36,6 +36,12 @@ from spansh_facility_cache import (
     get_system_facilities,
 )
 from bgs_rules import register_bgs_rule_routes
+from redeem_voucher import (
+    encode_factions,
+    normalize_redeem_voucher_payload,
+    parse_event_payload,
+    primary_redeem_voucher_faction,
+)
 
 # Globaler Lock für alle Schreibzugriffe auf die Tenant-DB (Events & Activities)
 db_write_lock = threading.Lock()
@@ -497,6 +503,13 @@ def post_events():
             events_data = request.get_json() or []
 
             for event_dict in events_data:
+                redeem_factions = []
+                redeem_primary_faction = None
+                if event_dict.get("event") == "RedeemVoucher":
+                    event_dict, redeem_factions, redeem_primary_faction = normalize_redeem_voucher_payload(
+                        event_dict
+                    )
+
                 event = Event.from_dict(event_dict)
                 db.session.add(event)
                 db.session.flush()  # erzeugt event.id
@@ -626,10 +639,10 @@ def post_events():
                     db.session.add(RedeemVoucherEvent(
                         event_id=event.id,
                         amount=event_dict.get("Amount"),
-                        faction=event_dict.get("Faction"),
+                        faction=redeem_primary_faction,
                         type=event_dict.get("Type"),
                         # zusätzliche Felder
-                        factions=json.dumps(event_dict.get("Factions")) if event_dict.get("Factions") else None,
+                        factions=encode_factions(redeem_factions),
                         station_faction=(event_dict.get("StationFaction") or {}).get("Name") if isinstance(event_dict.get("StationFaction"), dict) else None,
                         starsystem=event_dict.get("StarSystem"),
                         systemaddress=event_dict.get("SystemAddress")
@@ -1755,9 +1768,6 @@ def get_bounty_vouchers():
         if tickid:
             where_clauses.append("e.tickid = :tickid")
             params["tickid"] = tickid
-        if faction:
-            where_clauses.append("rv.faction = :faction")
-            params["faction"] = faction
         if squadron_rank:
             where_clauses.append("c.squadron_rank = :squadron_rank")
             params["squadron_rank"] = squadron_rank
@@ -1777,7 +1787,8 @@ def get_bounty_vouchers():
                 e.tickid,
                 rv.amount,
                 rv.type,
-                rv.faction
+                rv.faction,
+                rv.factions
             FROM redeem_voucher_event rv
             JOIN event e ON e.id = rv.event_id
             LEFT JOIN cmdr c ON c.name = e.cmdr
@@ -1786,7 +1797,35 @@ def get_bounty_vouchers():
         """
 
         rows = db.session.execute(text(sql), params).fetchall()
-        return jsonify([dict(r._mapping) for r in rows])
+        response_rows = []
+        for row in rows:
+            item = dict(row._mapping)
+            try:
+                allocations = json.loads(item.get("factions") or "[]")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                allocations = []
+            if not isinstance(allocations, list):
+                allocations = []
+
+            item["factions"] = allocations
+            if not item.get("faction"):
+                item["faction"] = primary_redeem_voucher_faction(
+                    {
+                        "Type": item.get("type"),
+                        "Amount": item.get("amount"),
+                        "Factions": allocations,
+                    },
+                    allocations,
+                )
+
+            if faction and not any(
+                isinstance(allocation, dict) and allocation.get("Faction") == faction
+                for allocation in allocations
+            ) and item.get("faction") != faction:
+                continue
+            response_rows.append(item)
+
+        return jsonify(response_rows)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -3853,11 +3892,9 @@ def fsdjump_factions():
             raw = event.raw_json
             if not raw:
                 continue
-            raw_json = None
-            try:
-                raw_json = ast.literal_eval(raw)
-            except Exception as ex:
-                logger.warning(f"Error parsing raw_json for Event {event.id}: {ex}")
+            raw_json = parse_event_payload(raw)
+            if raw_json is None:
+                logger.warning(f"Error parsing raw_json for Event {event.id}")
                 continue
             if not raw_json or "Factions" not in raw_json or not raw_json.get("StarSystem"):
                 continue

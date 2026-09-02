@@ -542,6 +542,10 @@ class ManualActivityEndpointSmokeTest(unittest.TestCase):
         self.assertEqual(faction.bvs, 2500000)
         redeem = db.session.query(RedeemVoucherEvent).one()
         self.assertEqual(redeem.type, "bounty")
+        self.assertEqual(
+            json.loads(redeem.factions),
+            [{"Faction": "Valkyries of Trade", "Amount": 2500000}],
+        )
 
         duplicate = self.client.post("/api/manual/activity", json=self._payload(), headers=self._headers())
         self.assertEqual(duplicate.status_code, 200)

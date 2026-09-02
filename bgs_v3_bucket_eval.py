@@ -64,7 +64,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from dateutil.relativedelta import relativedelta
 from flask import jsonify, request, g, has_request_context
 from urllib.parse import quote
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy import create_engine
 import requests
 import logging
@@ -372,6 +372,27 @@ def _period_range_utc(period: str) -> Tuple[Optional[str], Optional[str]]:
     return start_iso, end_iso
 
 
+def _resolve_tickid_for_period(db, period: str, tickid: Optional[str]) -> Optional[str]:
+    """Resolve current/last-tick shortcuts once instead of treating them as all-time."""
+    if tickid or period not in {"ct", "lt"}:
+        return tickid
+
+    row = db.session.execute(
+        text(
+            """
+            SELECT tickid
+            FROM event
+            WHERE tickid IS NOT NULL AND tickid != ''
+            GROUP BY tickid
+            ORDER BY MAX(timestamp) DESC
+            LIMIT 1 OFFSET :offset
+            """
+        ),
+        {"offset": 0 if period == "ct" else 1},
+    ).first()
+    return row[0] if row else None
+
+
 # ---------------------------
 # Bucket formulas
 # ---------------------------
@@ -443,28 +464,40 @@ def get_population_map_from_eddn(system_names: List[str]) -> Dict[str, Optional[
         logger.info("EDDN_DATABASE not configured; returning None for all populations")
         return pop_map
 
+    eddn_engine = None
     try:
         eddn_engine = create_engine(eddn_db_uri)
+        requested_by_name = {name.casefold(): name for name in system_names if name}
+        unique_names = list(requested_by_name.values())
+        statement = text(
+            "SELECT system_name, population FROM eddn_system_info "
+            "WHERE system_name COLLATE NOCASE IN :system_names"
+        ).bindparams(bindparam("system_names", expanding=True))
+
         with eddn_engine.connect() as conn:
-            for name in system_names:
-                if not name:
-                    pop_map[name] = None
+            for start in range(0, len(unique_names), 500):
+                chunk = unique_names[start:start + 500]
+                if not chunk:
                     continue
-                try:
-                    row = conn.execute(
-                        text("SELECT population FROM eddn_system_info WHERE system_name = :name COLLATE NOCASE"),
-                        {"name": name}
-                    ).mappings().first()
-                    pop = int(row["population"]) if row and row.get("population") is not None else None
-                    pop_map[name] = pop
-                    logger.info(f"Population lookup: '{name}' -> {pop}")
-                except Exception as e:
-                    logger.warning(f"Population lookup failed for '{name}': {e}")
-                    pop_map[name] = None
+                for row in conn.execute(statement, {"system_names": chunk}).mappings():
+                    database_name = row.get("system_name")
+                    if not isinstance(database_name, str):
+                        continue
+                    requested_name = requested_by_name.get(database_name.casefold())
+                    if requested_name is None:
+                        continue
+                    pop_map[requested_name] = (
+                        int(row["population"])
+                        if row.get("population") is not None
+                        else None
+                    )
     except Exception as e:
         logger.warning(f"Failed to open EDDN DB at {eddn_db_uri}: {e}")
         # On engine/connect failure, return defaults (None)
         return pop_map
+    finally:
+        if eddn_engine is not None:
+            eddn_engine.dispose()
 
     found = sum(1 for v in pop_map.values() if v is not None)
     logger.info(f"get_population_map_from_eddn returning map for {len(pop_map)} systems, with {found} populations found")
@@ -577,6 +610,7 @@ def evaluate_bounty_bucket(
     logger = init_logger()
     logger.info(f"evaluate_bounty_bucket called: period={period}, tickid={tickid}, ticktime={ticktime}, systemaddress={systemaddress}, system={system}, faction_filter={faction_filter}, include_cmdr={include_cmdr}, clamp_negative={clamp_negative}")
 
+    tickid = _resolve_tickid_for_period(db, period, tickid)
     where = ["rv.type = 'bounty'", "rv.factions IS NOT NULL", "rv.factions != ''"]
 
     params: Dict[str, Any] = {}
@@ -810,6 +844,7 @@ def evaluate_exploration_bucket(
         f"include_cmdr={include_cmdr}, clamp_negative={clamp_negative}"
     )
 
+    tickid = _resolve_tickid_for_period(db, period, tickid)
     params: Dict[str, Any] = {}
 
     start_iso, end_iso = _period_range_utc(period)
@@ -1036,6 +1071,8 @@ def evaluate_bucket_all_metrics(
         f"systemaddress={systemaddress}, system={system}, faction_filter={faction_filter}, "
         f"include_cmdr={include_cmdr}, clamp_negative={clamp_negative}"
     )
+
+    tickid = _resolve_tickid_for_period(db, period, tickid)
 
     bounty_rows = evaluate_bounty_bucket(
         db=db,
@@ -1337,6 +1374,7 @@ def register_bucket_v3_routes(app, db, require_api_key):
     @require_api_key
     def api_bgs_v3_bucket():
         period, tickid, ticktime, systemaddress, system, faction, include_cmdr, clamp_negative, _, _persist = _read_common_params()
+        tickid = _resolve_tickid_for_period(db, period, tickid)
 
         rows = evaluate_bucket_all_metrics(
             db=db,
@@ -1372,6 +1410,7 @@ def register_bucket_v3_routes(app, db, require_api_key):
     def api_bgs_v3_bucket_discord():
         logger = init_logger()
         period, tickid, ticktime, systemaddress, system, faction, include_cmdr, clamp_negative, _, persist_enabled = _read_common_params()
+        tickid = _resolve_tickid_for_period(db, period, tickid)
 
         calling_tenant = getattr(g, "tenant", None)
         if not calling_tenant:

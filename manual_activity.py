@@ -30,6 +30,7 @@ from models import (
     System,
     db,
 )
+from redeem_voucher import encode_factions
 
 manual_activity_bp = Blueprint("manual_activity", __name__)
 
@@ -727,8 +728,9 @@ def _create_events(data, captured_at, tickid, ticktime):
         return event
 
     if activity_type == "bounty_voucher":
-        event = add_id(_create_base_event(data, captured_at, tickid, ticktime, "RedeemVoucher", {"Amount": amount, "Faction": faction_name, "Type": "bounty"}))
-        db.session.add(RedeemVoucherEvent(event_id=event.id, amount=amount, faction=faction_name, type="bounty", starsystem=data["system_name"], systemaddress=data["system_address"]))
+        factions = [{"Faction": faction_name, "Amount": amount}]
+        event = add_id(_create_base_event(data, captured_at, tickid, ticktime, "RedeemVoucher", {"Amount": amount, "Faction": faction_name, "Factions": factions, "Type": "bounty"}))
+        db.session.add(RedeemVoucherEvent(event_id=event.id, amount=amount, faction=faction_name, factions=encode_factions(factions), type="bounty", starsystem=data["system_name"], systemaddress=data["system_address"]))
     elif activity_type == "combat_bond":
         event = add_id(_create_base_event(data, captured_at, tickid, ticktime, "RedeemVoucher", {"Amount": amount, "Faction": faction_name, "Type": "CombatBond"}))
         db.session.add(RedeemVoucherEvent(event_id=event.id, amount=amount, faction=faction_name, type="CombatBond", starsystem=data["system_name"], systemaddress=data["system_address"]))

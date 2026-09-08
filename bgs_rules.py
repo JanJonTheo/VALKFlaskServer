@@ -987,6 +987,26 @@ def _insert_template_rule(
     return rule_id
 
 
+def restore_empty_rule_package(session, package, template, user_id: int) -> bool:
+    """Restore an explicitly reapplied empty package, preserving delivery settings."""
+    if session.execute(
+        text("SELECT 1 FROM dashboard_bgs_rule WHERE package_id = :id LIMIT 1"),
+        {"id": package["id"]},
+    ).first():
+        return False
+    now = utc_now()
+    for item in _template_definition(template)["items"]:
+        _insert_template_rule(
+            session, package=dict(package), template=dict(template),
+            item=item, user_id=user_id, now=now,
+        )
+    session.execute(
+        text("UPDATE dashboard_bgs_rule_package SET template_version=:version, updated_at=:now WHERE id=:id"),
+        {"id": package["id"], "version": template["version"], "now": now},
+    )
+    return True
+
+
 def register_bgs_rule_routes(app, db, require_api_key, commit_with_retry, logger):
     dashboard_only = lambda capability=None: _dashboard_only(db, capability)
 
@@ -1223,10 +1243,18 @@ def register_bgs_rule_routes(app, db, require_api_key, commit_with_retry, logger
             {"template_id": template_id, "owner_key": owner_key},
         ).mappings().first()
         if existing:
+            restored = restore_empty_rule_package(db.session, existing, template, user_id)
+            if restored:
+                commit_with_retry(db.session)
+                existing = db.session.execute(
+                    text("SELECT * FROM dashboard_bgs_rule_package WHERE id = :id"),
+                    {"id": existing["id"]},
+                ).mappings().one()
             return jsonify(
                 {
                     "data": _package_with_rules(db.session, existing),
                     "already_applied": True,
+                    "restored": restored,
                 }
             )
         requested_discord = bool(data.get("discord", template["default_discord"]))
@@ -1466,6 +1494,14 @@ def register_bgs_rule_routes(app, db, require_api_key, commit_with_retry, logger
             return _error(*error)
         if request.method == "DELETE":
             db.session.execute(text("DELETE FROM dashboard_bgs_rule WHERE id = :id"), {"id": rule_id})
+            if existing["package_id"]:
+                db.session.execute(
+                    text(
+                        "DELETE FROM dashboard_bgs_rule_package WHERE id = :package_id "
+                        "AND NOT EXISTS (SELECT 1 FROM dashboard_bgs_rule WHERE package_id = :package_id)"
+                    ),
+                    {"package_id": existing["package_id"]},
+                )
             commit_with_retry(db.session)
             return jsonify({"ok": True})
         try:
@@ -1572,7 +1608,69 @@ def register_bgs_rule_routes(app, db, require_api_key, commit_with_retry, logger
             }
             for row in rows
         ]
+        try:
+            validate_discord_webhook((g.tenant.get("discord_webhooks") or {}).get("bgs"))
+            configured = True
+        except ValueError:
+            configured = False
+        for item in data:
+            deliveries = db.session.execute(text(
+                "SELECT status, delivered_at, last_error FROM dashboard_notification_delivery "
+                "WHERE alert_id=:id AND channel='tenant_discord' "
+                "ORDER BY CASE WHEN status IN ('pending','processing','retry') THEN 0 ELSE 1 END, created_at DESC"
+            ), {"id": item["id"]}).mappings().all()
+            latest = deliveries[0] if deliveries else None
+            item["discord"] = {
+                "configured": configured,
+                "status": latest["status"] if latest else None,
+                "last_sent_at": max((d["delivered_at"] for d in deliveries if d["delivered_at"]), default=None),
+                "error": "Discord delivery failed. Please try again." if latest and latest["status"] == "failed" else None,
+            }
         return jsonify({"data": data, "unread_count": unread_count, "generated_at": utc_now()})
+
+    @app.route("/api/dashboard/bgs/alerts/<alert_id>/discord", methods=["POST"])
+    @require_api_key
+    @dashboard_only("reports:send")
+    def dashboard_bgs_alert_discord(alert_id):
+        user_id = int(g.dashboard_user["id"])
+        visible = db.session.execute(text(
+            "SELECT 1 FROM dashboard_bgs_alert WHERE id=:id AND "
+            "(owner_scope='tenant' OR (owner_scope='personal' AND owner_user_id=:user_id))"
+        ), {"id": alert_id, "user_id": user_id}).first()
+        if not visible:
+            return _error("NOT_FOUND", "Alert not found", 404)
+        body = request.get_json(silent=True)
+        try:
+            request_id = str(uuid.UUID(str(body.get("request_id")))) if isinstance(body, dict) else None
+        except (ValueError, TypeError, AttributeError):
+            request_id = None
+        if not request_id:
+            return _error("INVALID_REQUEST", "A valid delivery request ID is required", 400)
+        try:
+            validate_discord_webhook((g.tenant.get("discord_webhooks") or {}).get("bgs"))
+        except ValueError:
+            return _error("WEBHOOK_NOT_CONFIGURED", "The tenant BGS channel webhook is not configured", 409)
+        now = utc_now()
+        destination = f"tenant:bgs:manual:{request_id}"
+        # One atomic write serializes competing clicks; the unique destination
+        # also prevents retrying a completed request from sending it again.
+        inserted = db.session.execute(text(
+            "INSERT OR IGNORE INTO dashboard_notification_delivery "
+            "(id,alert_id,channel,destination_key,status,attempts,next_attempt_at,created_at,updated_at) "
+            "SELECT :delivery_id,:alert_id,'tenant_discord',:destination,'pending',0,:now,:now,:now "
+            "WHERE NOT EXISTS (SELECT 1 FROM dashboard_notification_delivery "
+            "WHERE alert_id=:alert_id AND channel='tenant_discord' AND status IN ('pending','processing','retry'))"
+        ), {"delivery_id": str(uuid.uuid4()), "alert_id": alert_id, "destination": destination, "now": now})
+        if inserted.rowcount:
+            audit_dashboard_event(db.session, "bgs_alert.discord", "queued", "bgs_alert", alert_id,
+                                  {"request_id": request_id, "destination": "tenant:bgs"})
+        commit_with_retry(db.session)
+        delivery = db.session.execute(text(
+            "SELECT id,status,delivered_at FROM dashboard_notification_delivery "
+            "WHERE alert_id=:id AND channel='tenant_discord' "
+            "ORDER BY CASE WHEN destination_key=:destination THEN 0 ELSE 1 END, created_at DESC LIMIT 1"
+        ), {"id": alert_id, "destination": destination}).mappings().first()
+        return jsonify({"data": dict(delivery) if delivery else None}), 202
 
     @app.route("/api/dashboard/bgs/alerts/<alert_id>/state", methods=["PATCH"])
     @require_api_key

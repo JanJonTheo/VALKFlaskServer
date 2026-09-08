@@ -28,6 +28,7 @@ from bgs_rules import (
     watchlist_systems,
 )
 from dashboard_users import ensure_dashboard_schema
+from bgs_discord import current_system, notification
 
 
 logger = logging.getLogger(__name__)
@@ -184,9 +185,7 @@ def _baseline(
             candidates.append((parsed, snapshot))
     if not candidates:
         return None
-    parsed, selected = max(candidates, key=lambda item: item[0])
-    if target - parsed > timedelta(hours=36):
-        return None
+    _, selected = max(candidates, key=lambda item: item[0])
     return selected
 
 
@@ -194,7 +193,6 @@ def evaluate_rule(
     rule: dict[str, Any],
     snapshots: list[dict[str, Any]],
     tenant_faction: str = "",
-    required_tick_pair: tuple[str, str] | None = None,
 ) -> dict[str, Any]:
     """Evaluate one rule. ``active=None`` means the available data is insufficient."""
 
@@ -213,25 +211,8 @@ def evaluate_rule(
     condition_config = _condition(rule)
     condition = condition_config["type"]
     if condition in TENANT_RULE_TYPES:
-        if required_tick_pair:
-            by_tick = {str(item.get("ticktime")): item for item in ordered}
-            latest = by_tick.get(required_tick_pair[0])
-            previous = by_tick.get(required_tick_pair[1])
-            if latest is None or previous is None:
-                return {
-                    "status": "insufficient_data",
-                    "active": None,
-                    "reason": "Consecutive settled snapshots are unavailable",
-                    "facts": {"ticktime": required_tick_pair[0]},
-                }
-            latest_time = _parse_ticktime(latest.get("ticktime"))
-            current = _payload(latest.get("payload_json", latest.get("payload")))
-            previous_payload = _payload(
-                previous.get("payload_json", previous.get("payload"))
-            )
-            _, factions = _snapshot_values(current)
-            _, previous_factions = _snapshot_values(previous_payload)
-        elif len(ordered) >= 2:
+        # Compare observations of this system, even when several ticks were missed.
+        if len(ordered) >= 2:
             previous = ordered[1]
             previous_payload = _payload(
                 previous.get("payload_json", previous.get("payload"))
@@ -241,7 +222,7 @@ def evaluate_rule(
             return {
                 "status": "insufficient_data",
                 "active": None,
-                "reason": "Consecutive settled snapshots are unavailable",
+                "reason": "Two settled system snapshots are required",
                 "facts": {"ticktime": latest.get("ticktime")},
             }
         current_tenant = _tenant_faction(factions, tenant_faction)
@@ -256,7 +237,7 @@ def evaluate_rule(
             return {
                 "status": "insufficient_data",
                 "active": None,
-                "reason": "The monitored faction is not comparable across consecutive snapshots",
+                "reason": "The monitored faction is not comparable across the available snapshots",
                 "facts": facts,
             }
         current_name, current_influence = current_tenant
@@ -409,7 +390,7 @@ def evaluate_rule(
         return {
             "status": "insufficient_data",
             "active": None,
-            "reason": "No sufficiently close settled baseline is available",
+            "reason": "No settled baseline at or before the requested window is available",
             "facts": base_facts,
         }
     baseline_payload = _payload(baseline.get("payload_json", baseline.get("payload")))
@@ -418,6 +399,7 @@ def evaluate_rule(
         {
             "baseline_ticktime": baseline.get("ticktime"),
             "window_days": int(rule.get("window_days") or 1),
+            "comparison_days": round((latest_time - _parse_ticktime(baseline.get("ticktime"))).total_seconds() / 86400, 2),
         }
     )
     if condition == "controller_loss":
@@ -475,7 +457,7 @@ def _alert_copy(rule: dict[str, Any], system: str, facts: dict[str, Any]) -> tup
     if condition == "tenant_faction_loss":
         message = (
             f"{facts.get('tenant_faction')} lost {facts.get('loss_pp'):.2f} percentage "
-            f"points since the previous settled BGS tick."
+            f"points since the previous available settled system snapshot."
         )
     elif condition == "tenant_faction_below":
         message = (
@@ -504,12 +486,12 @@ def _alert_copy(rule: dict[str, Any], system: str, facts: dict[str, Any]) -> tup
     elif condition == "controller_gap":
         message = f"{facts.get('competitor')} is only {facts.get('gap_pp'):.2f} percentage points behind {facts.get('controlling_faction')}."
     elif condition == "controller_loss":
-        message = f"{facts.get('controlling_faction')} lost {facts.get('loss_pp'):.2f} percentage points over {facts.get('window_days')} day(s)."
+        message = f"{facts.get('controlling_faction')} lost {facts.get('loss_pp'):.2f} percentage points over {facts.get('comparison_days', facts.get('window_days'))} day(s)."
     else:
         strongest = facts.get("strongest_change") or {}
         verb = "gained" if condition == "competitor_gain" else "lost"
         amount = abs(float(strongest.get("delta_pp") or 0))
-        message = f"{strongest.get('faction', 'A competing faction')} {verb} {amount:.2f} percentage points over {facts.get('window_days')} day(s)."
+        message = f"{strongest.get('faction', 'A competing faction')} {verb} {amount:.2f} percentage points over {facts.get('comparison_days', facts.get('window_days'))} day(s)."
     return f"{rule['name']} · {system}", message
 
 
@@ -548,19 +530,6 @@ def _snapshots_for_system(snapshot_engine, system: str) -> list[dict[str, Any]]:
             {"system": system},
         ).mappings().all()
     return [dict(row) for row in rows]
-
-
-def _latest_settled_tick_pair(snapshot_engine) -> tuple[str, str] | None:
-    with snapshot_engine.connect() as conn:
-        rows = conn.execute(
-            text(
-                "SELECT DISTINCT ticktime FROM system_tick_snapshot "
-                "WHERE is_settled = 1 ORDER BY ticktime DESC LIMIT 2"
-            )
-        ).all()
-    if len(rows) != 2:
-        return None
-    return str(rows[0][0]), str(rows[1][0])
 
 
 def _global_tenant_systems(eddn_engine, tenant_faction: str) -> list[str]:
@@ -736,7 +705,6 @@ def _evaluate_tenant(tenant: dict[str, Any], snapshot_engine, eddn_engine=None) 
     counts = {"rules": 0, "systems": 0, "alerts": 0, "resolved": 0, "insufficient": 0}
     try:
         ensure_dashboard_schema(tenant_engine)
-        required_tick_pair = _latest_settled_tick_pair(snapshot_engine)
         with tenant_engine.begin() as conn:
             rules = [
                 dict(row)
@@ -805,29 +773,28 @@ def _evaluate_tenant(tenant: dict[str, Any], snapshot_engine, eddn_engine=None) 
                         rule,
                         snapshots,
                         tenant_faction=monitored_faction,
-                        required_tick_pair=(
-                            required_tick_pair
-                            if rule["condition_type"] in TENANT_RULE_TYPES
-                            else None
-                        ),
                     )
                     ticktime = (result.get("facts") or {}).get("ticktime")
                     previous = existing_states.get(key)
                     now = utc_now()
                     previous_active = None if previous is None or previous["condition_active"] is None else bool(previous["condition_active"])
                     active = result.get("active")
-                    is_new_tick = bool(ticktime) and (
-                        previous is None or previous["last_evaluated_ticktime"] != ticktime
-                    )
                     baseline_only = bool(rule.get("package_id")) and (
                         previous is None or previous["status"] == "paused_target_missing"
                     )
+                    previous_observations = _payload(previous["observations_json"]) if previous else {}
+                    baseline_ticktime = previous_observations.get("baseline_ticktime")
+                    if baseline_only:
+                        baseline_ticktime = ticktime if active is not None else None
                     if active is None:
                         counts["insufficient"] += 1
                     events = list(result.get("events") or [])
                     should_alert = False
                     if rule["condition_type"] in TENANT_RULE_TYPES:
-                        should_alert = bool(events) and is_new_tick and not baseline_only
+                        # Re-evaluate late or corrected observations of the same tick.
+                        # The alert's unique (rule, system, event, tick) identity
+                        # makes retries idempotent without dropping late events.
+                        should_alert = bool(events) and not baseline_only and ticktime != baseline_ticktime
                     else:
                         should_alert = bool(active) and previous_active is not True
                     counts["resolved"] += _resolve_inactive_alerts(
@@ -876,6 +843,7 @@ def _evaluate_tenant(tenant: dict[str, Any], snapshot_engine, eddn_engine=None) 
                     observations = {
                         "facts": result.get("facts") or {},
                         "active_event_keys": result.get("active_event_keys") or [],
+                        "baseline_ticktime": baseline_ticktime,
                     }
                     conn.execute(
                         text(
@@ -890,7 +858,7 @@ def _evaluate_tenant(tenant: dict[str, Any], snapshot_engine, eddn_engine=None) 
                             "rule_id": rule["id"],
                             "system_key": key,
                             "system_name": system,
-                            "ticktime": ticktime,
+                            "ticktime": (previous["last_evaluated_ticktime"] if previous else None) if active is None else ticktime,
                             "active": stored_active,
                             "status": result["status"],
                             "observations": json.dumps(observations, separators=(",", ":")),
@@ -965,7 +933,7 @@ def _dispatch_tenant(tenant: dict[str, Any]) -> None:
                 dict(row)
                 for row in conn.execute(
                     text(
-                        "SELECT d.*, a.title, a.message, a.severity, a.system_name, a.fired_ticktime "
+                        "SELECT d.*, a.title, a.message, a.severity, a.system_name, a.fired_ticktime, a.fired_at, a.resolved_at, a.facts_json, a.event_key, a.owner_scope "
                         "FROM dashboard_notification_delivery d JOIN dashboard_bgs_alert a ON a.id = d.alert_id "
                         "WHERE d.status IN ('pending','retry') AND d.attempts < 3 "
                         "AND d.next_attempt_at <= :now AND (d.lease_until IS NULL OR d.lease_until < :now) "
@@ -994,14 +962,14 @@ def _dispatch_tenant(tenant: dict[str, Any]) -> None:
                 error = "Discord webhook is no longer configured or decryptable"
             else:
                 try:
+                    current_data = current_system(delivery["system_name"])
+                except Exception:
+                    logger.warning("Current BGS data unavailable for Discord alert %s", delivery["alert_id"])
+                    current_data = ({}, [])
+                try:
                     response = requests.post(
                         webhook,
-                        json={
-                            "content": (
-                                f"**{delivery['title']}**\n{delivery['message']}\n"
-                                f"Severity: `{delivery['severity']}` · Settled tick: `{delivery['fired_ticktime']}`"
-                            )
-                        },
+                        json=notification(delivery, *current_data),
                         timeout=8,
                     )
                     if response.status_code not in (200, 204):

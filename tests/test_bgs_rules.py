@@ -13,7 +13,7 @@ from flask import Flask, g, request
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import scoped_session, sessionmaker
 
-from bgs_rule_scheduler import _delivery_webhook, _evaluate_tenant, evaluate_rule
+from bgs_rule_scheduler import _delivery_webhook, _dispatch_tenant, _evaluate_tenant, evaluate_rule
 from bgs_rules import _call_openai, decrypt_webhook, encrypt_webhook, expansion_range, register_bgs_rule_routes, validate_discord_webhook
 from dashboard_users import _ensure_bgs_alert_event_identity, ensure_dashboard_schema, utc_now
 
@@ -85,28 +85,24 @@ class RuleEvaluationTest(unittest.TestCase):
             "window_days": 1,
         }
 
-    def test_tenant_faction_transition_rules_use_consecutive_snapshots(self):
-        previous = self.tenant_snapshot("2026-08-28T12:00:00Z", 0.08, 0.04)
+    def test_tenant_faction_transition_rules_allow_days_between_snapshots(self):
+        previous = self.tenant_snapshot("2026-08-20T12:00:00Z", 0.08, 0.04)
         current = self.tenant_snapshot("2026-08-29T12:00:00Z", 0.04, 0.02)
-        pair = (current["ticktime"], previous["ticktime"])
 
         loss = evaluate_rule(
             self.tenant_rule({"type": "tenant_faction_loss", "threshold_pp": 3}),
             [current, previous],
             "Test Faction",
-            pair,
         )
         below = evaluate_rule(
             self.tenant_rule({"type": "tenant_faction_below", "threshold_pp": 5}),
             [current, previous],
             "Test Faction",
-            pair,
         )
         gap = evaluate_rule(
             self.tenant_rule({"type": "tenant_faction_gap", "threshold_pp": 2}),
             [current, previous],
             "Test Faction",
-            pair,
         )
 
         self.assertEqual(loss["events"], ["loss:2026-08-29T12:00:00Z"])
@@ -114,11 +110,18 @@ class RuleEvaluationTest(unittest.TestCase):
         self.assertEqual(gap["events"], ["gap:rival"])
         missing = evaluate_rule(
             self.tenant_rule({"type": "tenant_faction_loss", "threshold_pp": 3}),
-            [current, previous],
+            [current],
             "Test Faction",
-            (current["ticktime"], "2026-08-27T12:00:00Z"),
         )
         self.assertEqual(missing["status"], "insufficient_data")
+
+    def test_windowed_rule_accepts_older_available_baseline(self):
+        current = snapshot("2026-09-08T12:00:00Z", controller_influence=0.20)
+        previous = snapshot("2026-09-01T12:00:00Z", controller_influence=0.30)
+        result = evaluate_rule(self.rule("controller_loss", 5), [current, previous])
+        self.assertTrue(result["active"])
+        self.assertEqual(result["facts"]["baseline_ticktime"], previous["ticktime"])
+        self.assertEqual(result["facts"]["comparison_days"], 7)
 
     def test_new_conflict_ignores_status_changes_and_civil_war(self):
         election = {
@@ -377,6 +380,41 @@ class RuleSchedulerIntegrationTest(unittest.TestCase):
         self.snapshot_engine.dispose()
         self.tempdir.cleanup()
 
+    def test_manual_delivery_dispatch_and_retry_use_only_the_tenant_webhook(self):
+        engine = create_engine(self.tenant_uri)
+        now = utc_now()
+        with engine.begin() as conn:
+            conn.execute(text(
+                "INSERT INTO dashboard_bgs_alert(id,rule_name,owner_scope,owner_user_id,system_key,system_name,"
+                "severity,title,message,fired_ticktime,fired_at) VALUES ('manual','Guard','personal',1,'sol','Sol',"
+                "'warning','Guard · Sol','Example alarm',:now,:now)"
+            ), {"now": now})
+            conn.execute(text(
+                "INSERT INTO dashboard_notification_delivery(id,alert_id,channel,destination_key,status,attempts,"
+                "next_attempt_at,created_at,updated_at) VALUES ('send','manual','tenant_discord','tenant:bgs:manual:request',"
+                "'pending',0,:now,:now,:now)"
+            ), {"now": now})
+        tenant = {"db_uri": self.tenant_uri, "discord_webhooks": {"bgs": "https://discord.com/api/webhooks/123/test_token"}}
+        with patch("bgs_rule_scheduler.requests.post", return_value=SimpleNamespace(status_code=503)) as post:
+            _dispatch_tenant(tenant)
+            self.assertEqual(post.call_args.args[0], tenant["discord_webhooks"]["bgs"])
+        with engine.begin() as conn:
+            row = conn.execute(text("SELECT status,delivered_at FROM dashboard_notification_delivery")).mappings().one()
+            self.assertEqual(row["status"], "retry")
+            self.assertIsNone(row["delivered_at"])
+            conn.execute(text("UPDATE dashboard_notification_delivery SET next_attempt_at='2000-01-01'"))
+        with patch("bgs_rule_scheduler.requests.post", return_value=SimpleNamespace(status_code=204)) as post:
+            _dispatch_tenant(tenant)
+            body = post.call_args.kwargs["json"]
+            self.assertEqual(body["embeds"][0]["title"], "Sol")
+            self.assertIn("ACTIVE", body["embeds"][0]["description"])
+            self.assertEqual(body["allowed_mentions"], {"parse": []})
+        with engine.connect() as conn:
+            row = conn.execute(text("SELECT status,delivered_at FROM dashboard_notification_delivery")).mappings().one()
+            self.assertEqual(row["status"], "delivered")
+            self.assertIsNotNone(row["delivered_at"])
+        engine.dispose()
+
     def add_snapshot(self, ticktime, controller_influence):
         with self.snapshot_engine.begin() as conn:
             conn.execute(
@@ -471,11 +509,59 @@ class RuleSchedulerIntegrationTest(unittest.TestCase):
         }
         baseline = _evaluate_tenant(tenant, self.snapshot_engine, self.eddn_engine)
         self.assertEqual(baseline["alerts"], 0)
+        self.assertEqual(_evaluate_tenant(tenant, self.snapshot_engine, self.eddn_engine)["alerts"], 0)
         self.add_tenant_snapshot("2026-08-30T12:00:00Z", 0.30)
         fired = _evaluate_tenant(tenant, self.snapshot_engine, self.eddn_engine)
         repeated = _evaluate_tenant(tenant, self.snapshot_engine, self.eddn_engine)
         self.assertEqual(fired["alerts"], 1)
         self.assertEqual(repeated["alerts"], 0)
+
+    def test_late_data_and_multi_day_gaps_fire_once_independently_of_global_ticks(self):
+        engine = create_engine(self.tenant_uri)
+        with engine.begin() as conn:
+            conn.execute(text(
+                "UPDATE dashboard_bgs_rule SET condition_type='tenant_faction_loss', threshold_pp=3"
+            ))
+        tenant = {"name": "Test", "db_uri": self.tenant_uri, "faction_name": "Test Faction"}
+        self.add_tenant_snapshot("2026-09-08T12:00:00Z", 0.30)
+        insufficient = _evaluate_tenant(tenant, self.snapshot_engine)
+        self.assertEqual(insufficient["insufficient"], 1)
+        with engine.connect() as conn:
+            self.assertIsNone(conn.execute(text(
+                "SELECT last_evaluated_ticktime FROM dashboard_bgs_rule_state"
+            )).scalar())
+        # A later global tick for another system must not block this system.
+        with self.snapshot_engine.begin() as conn:
+            conn.execute(text(
+                "INSERT INTO system_tick_snapshot(ticktime, system_name, payload_json, is_settled) "
+                "VALUES ('2026-09-09T12:00:00Z', 'Other System', '{}', 1)"
+            ))
+        self.add_tenant_snapshot("2026-09-01T12:00:00Z", 0.40)
+        fired = _evaluate_tenant(tenant, self.snapshot_engine)
+        repeated = _evaluate_tenant(tenant, self.snapshot_engine)
+        self.assertEqual(fired["alerts"], 1)
+        self.assertEqual(repeated["alerts"], 0)
+        with engine.connect() as conn:
+            facts = json.loads(conn.execute(text("SELECT facts_json FROM dashboard_bgs_alert")).scalar())
+        self.assertEqual(facts["baseline_ticktime"], "2026-09-01T12:00:00Z")
+        self.assertEqual(facts["loss_pp"], 10)
+        engine.dispose()
+
+    def test_corrected_data_in_same_tick_can_trigger_after_successful_evaluation(self):
+        engine = create_engine(self.tenant_uri)
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE dashboard_bgs_rule SET condition_type='tenant_faction_loss', threshold_pp=3"))
+        engine.dispose()
+        tenant = {"name": "Test", "db_uri": self.tenant_uri, "faction_name": "Test Faction"}
+        self.add_tenant_snapshot("2026-09-01T12:00:00Z", 0.40)
+        self.add_tenant_snapshot("2026-09-08T12:00:00Z", 0.39)
+        self.assertEqual(_evaluate_tenant(tenant, self.snapshot_engine)["alerts"], 0)
+        corrected = RuleEvaluationTest.tenant_snapshot("2026-09-08T12:00:00Z", 0.30, 0.10)
+        with self.snapshot_engine.begin() as conn:
+            conn.execute(text("UPDATE system_tick_snapshot SET payload_json=:payload WHERE ticktime=:tick"),
+                         {"payload": json.dumps(corrected["payload_json"]), "tick": corrected["ticktime"]})
+        self.assertEqual(_evaluate_tenant(tenant, self.snapshot_engine)["alerts"], 1)
+        self.assertEqual(_evaluate_tenant(tenant, self.snapshot_engine)["alerts"], 0)
 
     def test_protected_package_uses_selected_faction_and_pauses_when_disabled(self):
         engine = create_engine(self.tenant_uri)
@@ -672,6 +758,7 @@ class RuleSchedulerIntegrationTest(unittest.TestCase):
 
 class RuleApiPermissionTest(unittest.TestCase):
     def setUp(self):
+        self.webhooks = {}
         self.engine = create_engine("sqlite://", connect_args={"check_same_thread": False})
         with self.engine.begin() as conn:
             conn.execute(text("""
@@ -720,7 +807,7 @@ class RuleApiPermissionTest(unittest.TestCase):
                     "Bearer admin": {"sub": "3", "role": "admin", "capabilities": ["dashboard:read", "protected-factions:manage"], "sid": "admin-session"},
                 }
                 g.dashboard_identity = identities.get(request.headers.get("authorization"))
-                g.tenant = {"id": "test", "name": "Test", "faction_name": "Test Faction", "discord_webhooks": {}}
+                g.tenant = {"id": "test", "name": "Test", "faction_name": "Test Faction", "discord_webhooks": self.webhooks}
                 return view(*args, **kwargs)
             return wrapped
 
@@ -730,6 +817,51 @@ class RuleApiPermissionTest(unittest.TestCase):
     def tearDown(self):
         self.session.remove()
         self.engine.dispose()
+
+    def add_manual_alert(self, scope="tenant", owner=None):
+        now = utc_now()
+        self.session.execute(text(
+            "INSERT INTO dashboard_bgs_alert(id,rule_name,owner_scope,owner_user_id,system_key,system_name,"
+            "severity,title,message,fired_ticktime,fired_at) VALUES ('manual','Guard',:scope,:owner,'sol','Sol',"
+            "'warning','Guard · Sol','Example alarm',:now,:now)"
+        ), {"scope": scope, "owner": owner, "now": now})
+        self.session.commit()
+
+    def test_manual_discord_permissions_missing_webhook_and_visibility(self):
+        self.add_manual_alert("personal", 2)
+        url = "/api/dashboard/bgs/alerts/manual/discord"
+        body = {"request_id": str(uuid.uuid4())}
+        self.assertEqual(self.client.post(url, headers={"authorization": "Bearer member"}, json=body).status_code, 403)
+        self.assertEqual(self.client.post(url, headers={"authorization": "Bearer admin"}, json=body).status_code, 404)
+        self.assertEqual(self.client.post(url, headers={"authorization": "Bearer lead"}, json=body).status_code, 409)
+        self.webhooks["bgs"] = "https://discord.com/api/webhooks/123/test_token"
+        self.assertEqual(self.client.post(url, headers={"authorization": "Bearer lead"}, json={}).status_code, 400)
+        self.assertEqual(self.client.post(url, headers={"authorization": "Bearer lead"}, json=body).status_code, 202)
+        self.assertEqual(self.session.execute(text("SELECT channel FROM dashboard_notification_delivery")).scalar_one(), "tenant_discord")
+
+    def test_manual_discord_is_idempotent_and_allows_explicit_resend(self):
+        self.add_manual_alert()
+        self.webhooks["bgs"] = "https://discord.com/api/webhooks/123/test_token"
+        url = "/api/dashboard/bgs/alerts/manual/discord"
+        headers = {"authorization": "Bearer lead"}
+        body = {"request_id": str(uuid.uuid4())}
+        first = self.client.post(url, headers=headers, json=body)
+        self.assertEqual(first.status_code, 202)
+        self.assertEqual(self.client.post(url, headers=headers, json=body).get_json(), first.get_json())
+        self.client.post(url, headers=headers, json={"request_id": str(uuid.uuid4())})
+        self.assertEqual(self.session.execute(text("SELECT COUNT(*) FROM dashboard_notification_delivery")).scalar_one(), 1)
+        sent = utc_now()
+        self.session.execute(text("UPDATE dashboard_notification_delivery SET status='delivered',delivered_at=:now"), {"now": sent})
+        self.session.commit()
+        self.client.post(url, headers=headers, json=body)
+        self.assertEqual(self.session.execute(text("SELECT COUNT(*) FROM dashboard_notification_delivery")).scalar_one(), 1)
+        self.client.post(url, headers=headers, json={"request_id": str(uuid.uuid4())})
+        self.assertEqual(self.session.execute(text("SELECT COUNT(*) FROM dashboard_notification_delivery")).scalar_one(), 2)
+        listed = self.client.get("/api/dashboard/bgs/alerts", headers=headers).get_json()["data"][0]
+        self.assertEqual(listed["discord"]["status"], "pending")
+        self.assertEqual(listed["discord"]["last_sent_at"], sent)
+        self.assertIsNone(listed["read_at"])
+        self.assertIsNone(listed["acknowledged_at"])
 
     @staticmethod
     def payload(scope):
@@ -757,6 +889,35 @@ class RuleApiPermissionTest(unittest.TestCase):
         visible = self.client.get("/api/dashboard/bgs/rules", headers={"authorization": "Bearer member"})
         self.assertEqual(visible.status_code, 200)
         self.assertEqual({rule["owner_scope"] for rule in visible.get_json()["data"]}, {"personal", "tenant"})
+
+    def test_empty_global_package_can_be_restored_without_duplicate_rules(self):
+        url = "/api/dashboard/bgs/rule-templates/bgs-tenant-faction-early-warning/apply"
+        headers = {"authorization": "Bearer lead"}
+        original = self.client.post(url, headers=headers, json={"watchlist_scope": "global"}).get_json()["data"]
+        self.session.execute(text("DELETE FROM dashboard_bgs_rule WHERE package_id=:id"), {"id": original["id"]})
+        self.session.commit()
+        denied = self.client.post(url, headers={"authorization": "Bearer member"}, json={"watchlist_scope": "global"})
+        self.assertEqual(denied.status_code, 403)
+        restored = self.client.post(url, headers=headers, json={"watchlist_scope": "global"}).get_json()
+        self.assertTrue(restored["restored"])
+        self.assertEqual(restored["data"]["id"], original["id"])
+        self.assertEqual(len(restored["data"]["rules"]), 4)
+        self.assertTrue(all(rule["owner_scope"] == "tenant" for rule in restored["data"]["rules"]))
+        repeated = self.client.post(url, headers=headers, json={"watchlist_scope": "global"}).get_json()
+        self.assertFalse(repeated["restored"])
+        self.assertEqual({r["id"] for r in restored["data"]["rules"]}, {r["id"] for r in repeated["data"]["rules"]})
+
+    def test_deleting_last_package_rule_removes_catalog_assignment(self):
+        headers = {"authorization": "Bearer lead"}
+        package = self.client.post(
+            "/api/dashboard/bgs/rule-templates/bgs-tenant-faction-early-warning/apply",
+            headers=headers, json={"watchlist_scope": "global"},
+        ).get_json()["data"]
+        for rule in package["rules"]:
+            response = self.client.delete(f"/api/dashboard/bgs/rules/{rule['id']}", headers=headers)
+            self.assertEqual(response.status_code, 200)
+        catalog = self.client.get("/api/dashboard/bgs/rule-templates", headers=headers).get_json()["data"]
+        self.assertFalse(any(p["id"] == package["id"] for t in catalog for p in t["packages"]))
 
     def test_bgs_ai_accepts_systems_outside_the_tenant_watchlist(self):
         source = {

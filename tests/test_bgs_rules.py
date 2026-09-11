@@ -145,7 +145,8 @@ class RuleEvaluationTest(unittest.TestCase):
         status_change = evaluate_rule(rule, [active, pending], "Test Faction")
         self.assertEqual(len(entered["events"]), 1)
         self.assertEqual(entered["facts"]["new_conflicts"][0]["type"], "election")
-        self.assertEqual(status_change["events"], [])
+        self.assertEqual(status_change["events"], entered["events"])
+        self.assertTrue(status_change["facts"]["new_conflicts"][0]["is_update"])
 
 
 class WebhookSecurityTest(unittest.TestCase):
@@ -310,6 +311,48 @@ class AlertIdentityMigrationTest(unittest.TestCase):
 
 
 class RuleSchedulerIntegrationTest(unittest.TestCase):
+    def test_conflict_updates_are_per_pair_per_tick_and_preserve_scores(self):
+        engine = create_engine(self.tenant_uri)
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE dashboard_bgs_rule SET condition_type='tenant_faction_new_conflict', severity='warning', condition_json=:condition"),
+                         {'condition': json.dumps({'type': 'tenant_faction_new_conflict', 'conflict_types': ['war', 'election']})})
+        tenant = {'name': 'Test', 'db_uri': self.tenant_uri, 'faction_name': 'Test Faction'}
+        def add(day, score, status='active', has_conflicts=True):
+            factions = [{'Name': n, 'Influence': .2} for n in ('Test Faction', 'Alpha', 'Beta')]
+            conflicts = [{'Faction1': {'Name': 'Test Faction', 'Stake': 'Home Port', 'WonDays': score},
+                          'Faction2': {'Name': name, 'Stake': name + ' Base', 'WonDays': 1},
+                          'WarType': kind, 'Status': status} for name, kind in [('Alpha', 'War'), ('Beta', 'Election')]] if has_conflicts else []
+            with self.snapshot_engine.begin() as conn:
+                conn.execute(text("INSERT INTO system_tick_snapshot VALUES (:tick,'Test System',:payload,1)"),
+                    {'tick': f'2026-09-{day:02d}T12:00:00Z', 'payload': json.dumps({'Factions': factions, 'Conflicts': conflicts})})
+        add(1, 0, has_conflicts=False)
+        add(2, 0, 'pending')
+        self.assertEqual(_evaluate_tenant(tenant, self.snapshot_engine)['alerts'], 2)
+        self.assertEqual(_evaluate_tenant(tenant, self.snapshot_engine)['alerts'], 0)
+        add(3, 2)
+        result = _evaluate_tenant(tenant, self.snapshot_engine)
+        self.assertEqual(result['alerts'], 2)
+        self.assertEqual(result['resolved'], 2)
+        self.assertEqual(_evaluate_tenant(tenant, self.snapshot_engine)['alerts'], 0)
+        with engine.connect() as conn:
+            current = conn.execute(text('SELECT facts_json FROM dashboard_bgs_alert WHERE resolved_at IS NULL')).scalars().all()
+            self.assertEqual(len(current), 2)
+            for value in current:
+                conflicts = json.loads(value)['new_conflicts']
+                self.assertEqual(len(conflicts), 1)
+                self.assertTrue(conflicts[0]['is_update'])
+                self.assertEqual(conflicts[0]['won_days1'], 2)
+                self.assertEqual(conflicts[0]['won_days2'], 1)
+                self.assertEqual(conflicts[0]['stake1'], 'Home Port')
+                self.assertEqual(conflicts[0]['stake2'], conflicts[0]['faction2'] + ' Base')
+        add(4, 3, 'won')
+        self.assertEqual(_evaluate_tenant(tenant, self.snapshot_engine)['alerts'], 2)
+        add(5, 3, 'won')
+        result = _evaluate_tenant(tenant, self.snapshot_engine)
+        self.assertEqual(result['alerts'], 0)
+        self.assertEqual(result['resolved'], 2)
+        engine.dispose()
+
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
         root = Path(self.tempdir.name)
@@ -405,9 +448,9 @@ class RuleSchedulerIntegrationTest(unittest.TestCase):
             conn.execute(text("UPDATE dashboard_notification_delivery SET next_attempt_at='2000-01-01'"))
         with patch("bgs_rule_scheduler.requests.post", return_value=SimpleNamespace(status_code=204)) as post:
             _dispatch_tenant(tenant)
-            body = post.call_args.kwargs["json"]
-            self.assertEqual(body["embeds"][0]["title"], "Sol")
-            self.assertIn("ACTIVE", body["embeds"][0]["description"])
+            body = post.call_args.kwargs.get("json") or json.loads(post.call_args.kwargs["data"]["payload_json"])
+            self.assertTrue(body["content"].startswith("## Sol"))
+            self.assertIn("ACTIVE", body["content"])
             self.assertEqual(body["allowed_mentions"], {"parse": []})
         with engine.connect() as conn:
             row = conn.execute(text("SELECT status,delivered_at FROM dashboard_notification_delivery")).mappings().one()
@@ -459,6 +502,8 @@ class RuleSchedulerIntegrationTest(unittest.TestCase):
             alerts = conn.execute(
                 text("SELECT resolved_at FROM dashboard_bgs_alert ORDER BY fired_at")
             ).all()
+            presentations = conn.execute(text("SELECT facts_json FROM dashboard_bgs_alert")).scalars().all()
+            self.assertTrue(all(json.loads(value)["presentation"]["version"] == 1 for value in presentations))
         engine.dispose()
         self.assertEqual(len(alerts), 2)
         self.assertIsNotNone(alerts[0][0])
@@ -826,6 +871,29 @@ class RuleApiPermissionTest(unittest.TestCase):
             "'warning','Guard · Sol','Example alarm',:now,:now)"
         ), {"scope": scope, "owner": owner, "now": now})
         self.session.commit()
+
+    def test_read_all_requires_admin_and_preserves_other_accounts(self):
+        url = "/api/dashboard/bgs/alerts/read-all"
+        self.add_manual_alert()
+        for role in ('member', 'lead'):
+            self.assertEqual(self.client.post(url, headers={'authorization': f'Bearer {role}'}).status_code, 403)
+        self.assertEqual(self.client.post(url).status_code, 401)
+        now = utc_now()
+        for i in range(205):
+            self.session.execute(text(
+                "INSERT INTO dashboard_bgs_alert(id,rule_name,owner_scope,owner_user_id,system_key,system_name,severity,title,message,fired_ticktime,fired_at) "
+                "VALUES (:id,'Rule','personal',:owner,'other','Other','info','Title','Message',:now,:now)"
+            ), {'id': f'bulk-{i}', 'owner': 3 if i < 204 else 1, 'now': now})
+        self.session.execute(text("INSERT INTO dashboard_bgs_alert_user_state VALUES ('manual',3,NULL,'ack'),('manual',1,'existing',NULL)"))
+        self.session.commit()
+        response = self.client.post(url + '?system=Sol&limit=1', headers={'authorization': 'Bearer admin'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()['updated_count'], 205)
+        self.assertEqual(self.session.execute(text("SELECT acknowledged_at FROM dashboard_bgs_alert_user_state WHERE alert_id='manual' AND user_id=3")).scalar_one(), 'ack')
+        self.assertEqual(self.session.execute(text("SELECT read_at FROM dashboard_bgs_alert_user_state WHERE alert_id='manual' AND user_id=1")).scalar_one(), 'existing')
+        self.assertEqual(self.session.execute(text("SELECT count(*) FROM dashboard_bgs_alert_user_state WHERE alert_id='bulk-204'")).scalar_one(), 0)
+        self.assertEqual(self.session.execute(text("SELECT count(*) FROM dashboard_bgs_alert WHERE resolved_at IS NOT NULL")).scalar_one(), 0)
+        self.assertEqual(self.client.post(url, headers={'authorization': 'Bearer admin'}).get_json()['updated_count'], 0)
 
     def test_manual_discord_permissions_missing_webhook_and_visibility(self):
         self.add_manual_alert("personal", 2)

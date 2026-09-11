@@ -26,6 +26,7 @@ from dashboard_users import (
     validate_dashboard_identity,
 )
 from spansh_facility_cache import SpanshFacilityError, get_system_facilities
+from bgs_alert_housekeeping import can_manage_alert, resolve_alert
 
 
 RULE_TYPES = {
@@ -1543,6 +1544,24 @@ def register_bgs_rule_routes(app, db, require_api_key, commit_with_retry, logger
         updated = db.session.execute(text("SELECT * FROM dashboard_bgs_rule WHERE id = :id"), {"id": rule_id}).mappings().one()
         return jsonify({"data": _serialize_rule(updated)})
 
+    @app.route("/api/dashboard/bgs/alerts/read-all", methods=["POST"])
+    @require_api_key
+    @dashboard_only("admin:read")
+    def dashboard_bgs_alerts_read_all():
+        user_id = int(g.dashboard_user["id"])
+        now = utc_now()
+        result = db.session.execute(text(
+            "INSERT INTO dashboard_bgs_alert_user_state(alert_id, user_id, read_at) "
+            "SELECT a.id, :user_id, :now FROM dashboard_bgs_alert a "
+            "LEFT JOIN dashboard_bgs_alert_user_state s ON s.alert_id=a.id AND s.user_id=:user_id "
+            "WHERE (a.owner_scope='tenant' OR (a.owner_scope='personal' AND a.owner_user_id=:user_id)) "
+            "AND s.read_at IS NULL "
+            "ON CONFLICT(alert_id,user_id) DO UPDATE SET read_at=excluded.read_at"
+        ), {"user_id": user_id, "now": now})
+        updated = max(0, result.rowcount or 0)
+        commit_with_retry(db.session)
+        return jsonify({"ok": True, "updated_count": updated})
+
     @app.route("/api/dashboard/bgs/alerts", methods=["GET"])
     @require_api_key
     @dashboard_only("dashboard:read")
@@ -1603,6 +1622,7 @@ def register_bgs_rule_routes(app, db, require_api_key, commit_with_retry, logger
                 "fired_ticktime": row["fired_ticktime"],
                 "fired_at": row["fired_at"],
                 "resolved_at": row["resolved_at"],
+                "can_manage": can_manage_alert(row, user_id, _role_for(g.dashboard_user)),
                 "read_at": row["read_at"],
                 "acknowledged_at": row["acknowledged_at"],
             }
@@ -1671,6 +1691,28 @@ def register_bgs_rule_routes(app, db, require_api_key, commit_with_retry, logger
             "ORDER BY CASE WHEN destination_key=:destination THEN 0 ELSE 1 END, created_at DESC LIMIT 1"
         ), {"id": alert_id, "destination": destination}).mappings().first()
         return jsonify({"data": dict(delivery) if delivery else None}), 202
+
+    @app.route("/api/dashboard/bgs/alerts/<alert_id>/resolve", methods=["POST"])
+    @app.route("/api/dashboard/bgs/alerts/<alert_id>", methods=["DELETE"])
+    @require_api_key
+    @dashboard_only("dashboard:read")
+    def dashboard_bgs_alert_manage(alert_id):
+        user_id = int(g.dashboard_user["id"])
+        alert = db.session.execute(text("SELECT * FROM dashboard_bgs_alert WHERE id=:id"),
+                                   {"id": alert_id}).mappings().first()
+        if not alert or (alert['owner_scope'] == 'personal' and alert['owner_user_id'] != user_id):
+            return _error("NOT_FOUND", "Alert not found", 404)
+        if not can_manage_alert(alert, user_id, _role_for(g.dashboard_user)):
+            return _error("FORBIDDEN", "Only admins may manage tenant-wide alerts", 403)
+        deleting = request.method == 'DELETE'
+        if deleting:
+            db.session.execute(text('DELETE FROM dashboard_bgs_alert WHERE id=:id'), {'id': alert_id})
+        else:
+            resolve_alert(db.session, alert_id, utc_now())
+        audit_dashboard_event(db.session, 'bgs_alert.delete' if deleting else 'bgs_alert.resolve',
+                              'success', 'bgs_alert', alert_id)
+        commit_with_retry(db.session)
+        return jsonify({'ok': True})
 
     @app.route("/api/dashboard/bgs/alerts/<alert_id>/state", methods=["PATCH"])
     @require_api_key

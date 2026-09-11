@@ -812,6 +812,11 @@ def ensure_dashboard_schema(engine) -> None:
                 },
             )
 
+            from bgs_alert_housekeeping import ensure_housekeeping_schema
+            ensure_housekeeping_schema(conn)
+            conn.execute(text("INSERT OR IGNORE INTO dashboard_schema_migration(version,name,applied_at) "
+                              "VALUES (8,'bgs_alert_housekeeping',:now)"), {'now': now})
+
     _execute_retry(migrate)
 
 

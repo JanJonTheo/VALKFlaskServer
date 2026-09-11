@@ -66,7 +66,7 @@ def context(alert):
     elif principal and f.get("competitor") and number(f.get("gap_pp")) is not None:
         names, summary = [principal, f["competitor"]], f"Gap {f['gap_pp']:.2f} pp"
     elif conflict.get("faction1") and conflict.get("faction2"):
-        names, summary = [conflict["faction1"], conflict["faction2"]], "New conflict: " + str(conflict.get("type") or conflict.get("war_type") or "Conflict")
+        names, summary = [conflict["faction1"], conflict["faction2"]], ("Conflict update: " if conflict.get("is_update") else "New conflict: ") + str(conflict.get("type") or conflict.get("war_type") or "Conflict")
     elif principal and number(f.get("loss_pp")) is not None:
         names, summary = [principal], f"Loss {f['loss_pp']:.2f} pp"
     elif change.get("faction") and number(change.get("delta_pp")) is not None:

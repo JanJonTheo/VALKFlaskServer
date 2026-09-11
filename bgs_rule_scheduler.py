@@ -28,7 +28,8 @@ from bgs_rules import (
     watchlist_systems,
 )
 from dashboard_users import ensure_dashboard_schema
-from bgs_discord import current_system, notification
+from bgs_alert_graphics import comparison, delivery_request
+from bgs_alert_housekeeping import cleanup_batch, BATCH_SIZE, resolve_alert
 
 
 logger = logging.getLogger(__name__)
@@ -170,8 +171,30 @@ def _snapshot_conflicts(
             "faction2": faction2,
             "type": conflict_type,
             "status": _token(conflict.get("Status") or conflict.get("status")),
+            "stake1": (conflict.get("Faction1") or {}).get("Stake") if isinstance(conflict.get("Faction1"), dict) else conflict.get("stake1"),
+            "stake2": (conflict.get("Faction2") or {}).get("Stake") if isinstance(conflict.get("Faction2"), dict) else conflict.get("stake2"),
+            "won_days1": (conflict.get("Faction1") or {}).get("WonDays") if isinstance(conflict.get("Faction1"), dict) else conflict.get("won_days1"),
+            "won_days2": (conflict.get("Faction2") or {}).get("WonDays") if isinstance(conflict.get("Faction2"), dict) else conflict.get("won_days2"),
         }
     return result
+
+
+def _gap_conflict_opponents(snapshot: dict[str, Any], faction: str) -> set[str]:
+    """Gap warnings are redundant only for this faction's pending/active opponents."""
+    conflicts = _snapshot_conflicts(
+        snapshot, faction, {"war", "election", "civilwar", "civil_war"}
+    )
+    aliases = {name.casefold() for name in _tenant_faction_aliases(faction)}
+    opponents = set()
+    for conflict in conflicts.values():
+        status = conflict["status"].removeprefix("factionwar")
+        if status not in {"", "pending", "active"}:
+            continue
+        opponents.update(
+            name.casefold() for name in (conflict["faction1"], conflict["faction2"])
+            if name.casefold() not in aliases
+        )
+    return opponents
 
 
 def _baseline(
@@ -294,8 +317,10 @@ def evaluate_rule(
             }
             active_items = []
             entered = []
+            conflict_opponents = _gap_conflict_opponents(current, current_name)
+            previous_conflict_opponents = _gap_conflict_opponents(previous_payload, previous_name)
             for key in sorted(set(current_by_key) & set(previous_by_key)):
-                if key in tenant_aliases:
+                if key in tenant_aliases or key in conflict_opponents:
                     continue
                 name, current_value = current_by_key[key]
                 _, previous_value = previous_by_key[key]
@@ -309,7 +334,7 @@ def evaluate_rule(
                         "previous_gap_pp": previous_gap,
                     }
                     active_items.append(item)
-                    if previous_gap > threshold:
+                    if previous_gap > threshold or key in previous_conflict_opponents:
                         entered.append(item)
             event_keys = [item["key"] for item in entered]
             return {
@@ -333,19 +358,24 @@ def evaluate_rule(
         previous_conflicts = _snapshot_conflicts(
             previous_payload, tenant_faction, allowed_types
         )
-        event_keys = sorted(set(current_conflicts) - set(previous_conflicts))
+        # One event per conflict and settled tick; the persisted event/tick identity
+        # deduplicates scheduler retries and corrected observations of the same tick.
+        def ongoing(conflict):
+            return conflict["status"].removeprefix("factionwar") in {"", "pending", "active"}
+        event_keys = sorted(key for key, conflict in current_conflicts.items()
+                            if ongoing(conflict) or (key in previous_conflicts and ongoing(previous_conflicts[key])))
         return {
             "status": "ok",
-            "active": bool(current_conflicts),
+            "active": bool(event_keys),
             "facts": {
                 **facts,
                 "conflict_types": sorted(allowed_types),
-                "new_conflicts": [current_conflicts[key] for key in event_keys],
+                "new_conflicts": [{**current_conflicts[key], "key": key, "is_update": key in previous_conflicts} for key in event_keys],
                 "active_conflicts": list(current_conflicts.values()),
                 "event_keys": event_keys,
             },
             "events": event_keys,
-            "active_event_keys": sorted(current_conflicts),
+            "active_event_keys": event_keys,
         }
     base_facts: dict[str, Any] = {
         "ticktime": latest.get("ticktime"),
@@ -383,7 +413,8 @@ def evaluate_rule(
             "competitor_influence_pp": rival_influence,
             "gap_pp": gap,
         }
-        return {"status": "ok", "active": gap <= threshold, "facts": facts}
+        in_conflict = rival.casefold() in _gap_conflict_opponents(current, controller)
+        return {"status": "ok", "active": gap <= threshold and not in_conflict, "facts": facts}
 
     baseline = _baseline(ordered, latest_time, int(rule.get("window_days") or 1))
     if baseline is None:
@@ -480,7 +511,12 @@ def _alert_copy(rule: dict[str, Any], system: str, facts: dict[str, Any]) -> tup
             f"{item.get('faction1')} vs {item.get('faction2')} ({str(item.get('type') or '').title()})"
             for item in conflicts
         )
-        message = f"{facts.get('tenant_faction')} entered a new conflict: {details}."
+        is_update = bool(conflicts) and all(item.get("is_update") for item in conflicts)
+        message = f"{'Conflict update' if is_update else 'New conflict'}: {details}."
+        for item in conflicts:
+            for side in (1, 2):
+                days = item.get(f"won_days{side}")
+                message += f" {item.get(f'faction{side}')}: {days if days is not None else 'unknown'} won days; stake: {item.get(f'stake{side}') or 'none reported'}."
     elif condition == "controller_below":
         message = f"{facts.get('controlling_faction')} is at {facts.get('controller_influence_pp'):.2f}% (below {threshold:.2f}%)."
     elif condition == "controller_gap":
@@ -675,6 +711,13 @@ def _resolve_inactive_alerts(
             ),
             {"now": now, "rule_id": rule["id"], "system_key": system_key},
         )
+        if condition == "controller_gap":
+            for alert_id in session.execute(
+                text("SELECT id FROM dashboard_bgs_alert WHERE rule_id=:rule_id "
+                     "AND system_key=:system_key AND resolved_at=:now"),
+                {"rule_id": rule["id"], "system_key": system_key, "now": now},
+            ).scalars():
+                resolve_alert(session, alert_id, now)
         return max(0, changed.rowcount or 0)
     active_keys = set(result.get("active_event_keys") or [])
     open_alerts = session.execute(
@@ -689,14 +732,18 @@ def _resolve_inactive_alerts(
         facts = _payload(alert["facts_json"])
         alert_keys = set(facts.get("event_keys") or [alert["event_key"]])
         should_resolve = not (alert_keys & active_keys)
-        if condition == "tenant_faction_loss":
+        if condition in {"tenant_faction_loss", "tenant_faction_new_conflict"}:
             should_resolve = alert["fired_ticktime"] != (result.get("facts") or {}).get("ticktime")
+            if condition == "tenant_faction_new_conflict":
+                should_resolve = should_resolve or not (alert_keys & active_keys)
         if should_resolve:
             changed = session.execute(
                 text("UPDATE dashboard_bgs_alert SET resolved_at=:now WHERE id=:id AND resolved_at IS NULL"),
                 {"now": now, "id": alert["id"]},
             )
             resolved += max(0, changed.rowcount or 0)
+            if condition in {"tenant_faction_gap", "tenant_faction_new_conflict"} and changed.rowcount:
+                resolve_alert(session, alert["id"], now)
     return resolved
 
 
@@ -807,6 +854,10 @@ def _evaluate_tenant(tenant: dict[str, Any], snapshot_engine, eddn_engine=None) 
                                 rule["condition_type"],
                                 result.get("facts") or {},
                                 event_key,
+                            )
+                            alert_facts["presentation"] = comparison(
+                                {"facts": alert_facts, "event_key": event_key, "fired_ticktime": ticktime},
+                                snapshots, rule["condition_type"],
                             )
                             title, message = _alert_copy(rule, system, alert_facts)
                             inserted = conn.execute(
@@ -962,14 +1013,9 @@ def _dispatch_tenant(tenant: dict[str, Any]) -> None:
                 error = "Discord webhook is no longer configured or decryptable"
             else:
                 try:
-                    current_data = current_system(delivery["system_name"])
-                except Exception:
-                    logger.warning("Current BGS data unavailable for Discord alert %s", delivery["alert_id"])
-                    current_data = ({}, [])
-                try:
                     response = requests.post(
                         webhook,
-                        json=notification(delivery, *current_data),
+                        **delivery_request(delivery),
                         timeout=8,
                     )
                     if response.status_code not in (200, 204):
@@ -1017,6 +1063,29 @@ def dispatch_all_tenants(tenants: list[dict[str, Any]]) -> None:
             logger.exception("BGS Discord outbox failed for %s", tenant.get("name"))
 
 
+def cleanup_all_tenants(tenants: list[dict[str, Any]]) -> None:
+    for tenant in tenants:
+        if not tenant.get('db_uri'):
+            continue
+        engine = _engine(tenant['db_uri'])
+        total = 0
+        try:
+            ensure_dashboard_schema(engine)
+            # Fixed cutoff and bounded transactions allow the evaluator to run between batches.
+            now = datetime.now(timezone.utc)
+            while True:
+                with engine.begin() as conn:
+                    count = cleanup_batch(conn, now)
+                total += count
+                if count < BATCH_SIZE:
+                    break
+            logger.info('BGS alert housekeeping for %s: deleted=%d', tenant.get('name'), total)
+        except Exception:
+            logger.exception('BGS alert housekeeping failed for %s after %d deletions', tenant.get('name'), total)
+        finally:
+            engine.dispose()
+
+
 def start_bgs_rule_scheduler(tenants: list[dict[str, Any]]) -> BackgroundScheduler:
     global _scheduler
     if _scheduler and _scheduler.running:
@@ -1041,6 +1110,11 @@ def start_bgs_rule_scheduler(tenants: list[dict[str, Any]]) -> BackgroundSchedul
         max_instances=1,
         coalesce=True,
         next_run_time=datetime.now(timezone.utc) + timedelta(seconds=45),
+    )
+    scheduler.add_job(
+        cleanup_all_tenants, IntervalTrigger(hours=1), args=[tenants],
+        id='bgs-alert-housekeeping', replace_existing=True, max_instances=1,
+        coalesce=True, next_run_time=datetime.now(timezone.utc) + timedelta(minutes=2),
     )
     scheduler.start()
     _scheduler = scheduler

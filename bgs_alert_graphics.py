@@ -164,11 +164,37 @@ def render_graphic(data):
         caption += ' · Previous gap: ' + (f'{old_gap:.2f} pp' if number(old_gap) is not None else 'Unavailable')
     ax.text(500, 60, caption, ha='center', va='top', color=muted, fontsize=12)
     if conflict:
-        for x, name in zip([250, 750], names):
-            ax.text(x, 126, textwrap.fill(textwrap.shorten(name, 48, placeholder='…'), 24), ha='center', va='center', fontsize=15, color=white)
-        ax.text(500, 126, 'VS', ha='center', va='center', color=red, fontsize=22, weight='bold')
+        # Keep the existing 1000 x 285 canvas and align both snapshot columns.
+        # Long labels are abbreviated here; full stakes remain in the embed.
+        ax.plot([500, 500], [88, 241], color='#2b3742', lw=1)
+        def column_text(x, y, value, **style):
+            artist = ax.text(x, y, value, ha='center', va='center', **style)
+            renderer = fig.canvas.get_renderer()
+            shortened = value
+            while artist.get_window_extent(renderer).width > 440 and shortened:
+                shortened = shortened[:-1].rstrip()
+                artist.set_text(shortened + '…')
+
+        wanted = {key(n) for n in names}
         for x, view in [(250, data['previous']), (750, data['current'])]:
-            ax.text(x, 200, textwrap.fill(conflict_text(view, names), 28), ha='center', va='center', color=gold, fontsize=13)
+            matching = next((c for c in view.get('conflicts', [])
+                             if view.get('ticktime') and
+                             {key(obj(c.get('Faction1')).get('Name')),
+                              key(obj(c.get('Faction2')).get('Name'))} == wanted), {})
+            sides = {key(obj(matching.get(side)).get('Name')): obj(matching.get(side))
+                     for side in ('Faction1', 'Faction2')}
+            column_text(x, 95, conflict_text(view, names), color=gold, fontsize=12)
+            for i, name in enumerate(names[:2]):
+                y = 124 + i * 67
+                faction = sides.get(key(name), {})
+                days = faction.get('WonDays')
+                stake = faction.get('Stake') or 'None reported'
+                if not matching:
+                    stake = 'Unavailable'
+                column_text(x, y, name, fontsize=12, color=white, weight='bold')
+                ax.text(x, y + 20, 'Won Days: ' + str(days if days is not None else '—'),
+                        ha='center', va='center', fontsize=12, color=gold)
+                column_text(x, y + 39, 'Stake: ' + str(stake), fontsize=10, color=muted)
     else:
         for i, (prev, curr) in enumerate(zip(data['previous']['factions'], data['current']['factions'])):
             y = 153 + i * 112

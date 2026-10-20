@@ -34,6 +34,62 @@ class GraphicsTests(unittest.TestCase):
         self.assertIn('Beta Port',detail)
         self.assertNotIn('Wrong port',detail)
 
+    def test_conflict_graphic_scores_stakes_order_and_fixed_dimensions(self):
+        import struct
+        from matplotlib.figure import Figure
+        views = []
+        for day in (0, 2):
+            views.append({'ticktime': self.after, 'available': True,
+                          'factions': [{'name': 'A'}, {'name': 'B'}], 'conflicts': [
+                {'Faction1': {'Name': 'X', 'Stake': 'Wrong port', 'WonDays': 4},
+                 'Faction2': {'Name': 'Y'}, 'WarType': 'war', 'Status': 'active'},
+                {'Faction1': {'Name': 'B', 'Stake': 'Beta Port', 'WonDays': None},
+                 'Faction2': {'Name': 'A', 'Stake': 'Alpha Port', 'WonDays': day},
+                 'WarType': 'war', 'Status': 'active'}]})
+        for reason in ('New conflict: War', 'Conflict update: War'):
+            captured = []
+            save = Figure.savefig
+            def capture(fig, *args, **kwargs):
+                captured.extend(fig.axes[0].texts)
+                return save(fig, *args, **kwargs)
+            with patch.object(Figure, 'savefig', capture):
+                png = render_graphic({'kind': 'conflict', 'reason': reason, 'threshold': '',
+                                      'previous': views[0], 'current': views[1]})
+            self.assertEqual(struct.unpack('>II', png[16:24]), (1000, 285))
+            entries = {(t.get_position(), t.get_text()) for t in captured}
+            self.assertIn(((250, 144), 'Won Days: 0'), entries)
+            self.assertIn(((750, 144), 'Won Days: 2'), entries)
+            self.assertIn(((750, 211), 'Won Days: —'), entries)
+            self.assertIn(((750, 163), 'Stake: Alpha Port'), entries)
+            self.assertIn(((750, 230), 'Stake: Beta Port'), entries)
+            self.assertFalse(any('Wrong port' in t.get_text() for t in captured))
+
+    def test_conflict_graphic_long_labels_fit_and_missing_snapshot_is_explicit(self):
+        from matplotlib.figure import Figure
+        names = ['W' * 100, 'Other faction ' * 12]
+        current = {'ticktime': self.after, 'available': True,
+                   'factions': [{'name': n} for n in names], 'conflicts': [
+            {'Faction1': {'Name': names[0], 'Stake': 'W' * 150, 'WonDays': 3},
+             'Faction2': {'Name': names[1]}, 'WarType': 'civilwar', 'Status': 'active'}]}
+        previous = {**current, 'available': False, 'ticktime': None, 'conflicts': []}
+        save = Figure.savefig
+        def capture(fig, *args, **kwargs):
+            fig.canvas.draw()
+            for t in fig.axes[0].texts:
+                x, y = t.get_position()
+                if 90 <= y <= 240:
+                    box = t.get_window_extent(fig.canvas.get_renderer())
+                    self.assertGreaterEqual(box.x0, x - 221)
+                    self.assertLessEqual(box.x1, x + 221)
+            texts = [t.get_text() for t in fig.axes[0].texts]
+            self.assertIn('Stake: Unavailable', texts)
+            self.assertIn('Stake: None reported', texts)
+            self.assertIn('Won Days: —', texts)
+            return save(fig, *args, **kwargs)
+        with patch.object(Figure, 'savefig', capture):
+            render_graphic({'kind': 'conflict', 'reason': 'Conflict update: Civil War',
+                            'threshold': '', 'previous': previous, 'current': current})
+
     def test_compact_single_faction_and_combined_links(self):
         import struct
         data = comparison(self.alert, self.rows)

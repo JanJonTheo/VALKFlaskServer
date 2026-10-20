@@ -1633,12 +1633,19 @@ def register_bgs_rule_routes(app, db, require_api_key, commit_with_retry, logger
             configured = True
         except ValueError:
             configured = False
-        for item in data:
+        deliveries_by_alert = {}
+        if data:
+            delivery_params = {f"alert_{index}": item["id"] for index, item in enumerate(data)}
+            placeholders = ", ".join(":" + key for key in delivery_params)
             deliveries = db.session.execute(text(
-                "SELECT status, delivered_at, last_error FROM dashboard_notification_delivery "
-                "WHERE alert_id=:id AND channel='tenant_discord' "
+                "SELECT alert_id, status, delivered_at, last_error FROM dashboard_notification_delivery "
+                f"WHERE alert_id IN ({placeholders}) AND channel='tenant_discord' "
                 "ORDER BY CASE WHEN status IN ('pending','processing','retry') THEN 0 ELSE 1 END, created_at DESC"
-            ), {"id": item["id"]}).mappings().all()
+            ), delivery_params).mappings().all()
+            for delivery in deliveries:
+                deliveries_by_alert.setdefault(delivery["alert_id"], []).append(delivery)
+        for item in data:
+            deliveries = deliveries_by_alert.get(item["id"], [])
             latest = deliveries[0] if deliveries else None
             item["discord"] = {
                 "configured": configured,

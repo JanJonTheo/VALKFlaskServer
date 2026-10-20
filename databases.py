@@ -207,6 +207,13 @@ def ensure_activity_query_indexes(conn, db_uri: str):
     """Ensure indexes used by tick-scoped Dashboard V2/V3 evaluations."""
     statements = (
         "CREATE INDEX IF NOT EXISTS idx_event_timestamp ON event(timestamp)",
+        "CREATE INDEX IF NOT EXISTS idx_market_buy_event_id ON market_buy_event(event_id)",
+        "CREATE INDEX IF NOT EXISTS idx_market_sell_event_id ON market_sell_event(event_id)",
+        "CREATE INDEX IF NOT EXISTS idx_mission_completed_event_id ON mission_completed_event(event_id)",
+        "CREATE INDEX IF NOT EXISTS idx_mission_failed_event_id ON mission_failed_event(event_id)",
+        "CREATE INDEX IF NOT EXISTS idx_commit_crime_event_id ON commit_crime_event(event_id)",
+        "CREATE INDEX IF NOT EXISTS idx_event_cmdr_tickid ON event(cmdr, tickid)",
+        "CREATE INDEX IF NOT EXISTS idx_event_type ON event(event)",
         "CREATE INDEX IF NOT EXISTS idx_event_tickid_timestamp ON event(tickid, timestamp)",
         "CREATE INDEX IF NOT EXISTS idx_redeem_voucher_type_event_id ON redeem_voucher_event(type, event_id)",
         "CREATE INDEX IF NOT EXISTS idx_sell_exploration_event_id ON sell_exploration_data_event(event_id)",

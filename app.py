@@ -36,6 +36,8 @@ from spansh_facility_cache import (
     get_system_facilities,
 )
 from bgs_rules import register_bgs_rule_routes
+from tenant_database import bind_tenant_session, remove_tenant_session, snapshot_history_index_hint
+from data_explorer_api import table_payload
 from redeem_voucher import (
     encode_factions,
     normalize_redeem_voucher_payload,
@@ -134,76 +136,17 @@ def get_tenant_by_apikey(apikey):
 
 # Setze die DB-Konfiguration für den aktuellen Tenant
 def set_tenant_db_config(tenant):
-    """Setzt die DB-Konfiguration für den aktuellen Tenant im Request-Kontext.
-    - Bei SQLite: Falls die Datei fehlt, wird sie inkl. Tabellenstruktur angelegt.
-    - Bei anderen DBs: Verbindung wird getestet, Fehler werden geloggt & im Request-Kontext hinterlegt.
-    """
+    """Bind only the current request; never replace the shared db.session."""
     if not tenant or not tenant.get("db_uri"):
-        error_msg = "Tenant oder Datenbank-URI nicht gefunden. Kein Fallback erlaubt."
-        logger.error(error_msg)
-        g.tenant_db_error = error_msg
+        g.tenant_db_error = "Tenant database is not configured"
         return
-
-    db_uri = tenant["db_uri"]
-
     try:
-        url = make_url(db_uri)
-        is_sqlite = url.drivername == "sqlite"
-
-        # Pfad zur SQLite-Datei ermitteln (kein Memory-DB)
-        sqlite_file_path = None
-        if is_sqlite:
-            # memory-DBs nicht anfassen
-            if url.database in (None, "", ":memory:"):
-                sqlite_file_path = None
-            else:
-                # Bei relativen Pfaden lässt SQLAlchemy sie relativ zum CWD auflösen.
-                sqlite_file_path = url.database
-                # Eventuell Verzeichnisse erstellen
-                dir_name = os.path.dirname(os.path.abspath(sqlite_file_path))
-                if dir_name and not os.path.exists(dir_name):
-                    os.makedirs(dir_name, exist_ok=True)
-
-        # Engine neu erstellen, falls URI sich geändert hat
-        engine_changed = not hasattr(g, "tenant_db_engine") or getattr(g, "tenant_db_uri", None) != db_uri
-
-        if engine_changed:
-            # Für SQLite: Threads erlauben + längeres Timeout
-            if is_sqlite:
-                connect_args = {"check_same_thread": False, "timeout": 30}
-            else:
-                connect_args = {}
-
-            engine = create_engine(db_uri, connect_args=connect_args)
-
-            # SQLite-spezifische PRAGMAs setzen (WAL-Modus, weniger striktes synchronous)
-            if is_sqlite:
-                def _set_sqlite_pragma(dbapi_connection, connection_record):
-                    cursor = dbapi_connection.cursor()
-                    cursor.execute("PRAGMA journal_mode=WAL;")
-                    cursor.execute("PRAGMA synchronous=NORMAL;")
-                    cursor.execute("PRAGMA foreign_keys=ON;")
-                    cursor.execute("PRAGMA busy_timeout=5000;")
-                    cursor.close()
-
-                event.listen(engine, "connect", _set_sqlite_pragma)
-
-            db.session = scoped_session(sessionmaker(bind=engine))
-            g.tenant_db_engine = engine
-            g.tenant_db_uri = db_uri
-        else:
-            engine = g.tenant_db_engine
-
-        # Verbindung testen
+        bind_tenant_session(tenant["db_uri"])
         db.session.execute(text("SELECT 1"))
-
-    except OperationalError as e:
-        logger.error(f"Tenant-Datenbank nicht gefunden oder nicht erreichbar: {db_uri} ({str(e)})")
-        g.tenant_db_error = str(e)
-    except Exception as e:
-        # Generischer Fallback für unerwartete Fehler
-        logger.exception(f"Fehler beim Setzen der Tenant-DB-Konfiguration für {db_uri}: {e}")
-        g.tenant_db_error = str(e)
+    except Exception as error:
+        remove_tenant_session()
+        logger.exception("Tenant database connection failed")
+        g.tenant_db_error = str(error)
 
 
 # Commit mit Retry bei 'database is locked'
@@ -230,7 +173,7 @@ def commit_with_retry(session, retries: int = 3, delay: float = 0.5):
 # Request teardown: Session entfernen
 @app.teardown_appcontext
 def remove_session(exception=None):
-    db.session.remove()
+    remove_tenant_session()
 
 
 # Decorator to require API key and set tenant context
@@ -1847,48 +1790,15 @@ def query_table(tablename):
         # Legacy clients keep the unpaginated response shape. Dashboard bearer
         # sessions and clients that opt into paging get a bounded envelope.
         dashboard_request = bool(getattr(g, "dashboard_identity", None))
-        paginated = dashboard_request or request.args.get("page") or request.args.get("page_size")
+        paginated = dashboard_request or any(request.args.get(key) for key in ("page", "page_size", "options", "search"))
         if not paginated:
             rows = db.session.execute(text(f'SELECT * FROM "{tablename}"')).fetchall()
             return jsonify([dict(row._mapping) for row in rows])
 
-        column_rows = db.session.execute(text(f'PRAGMA table_info("{tablename}")')).fetchall()
-        columns = {row._mapping["name"] for row in column_rows}
-        page = max(1, request.args.get("page", 1, type=int) or 1)
-        page_size = min(250, max(1, request.args.get("page_size", 25, type=int) or 25))
-        sort = request.args.get("sort")
-        if sort not in columns:
-            sort = next(iter(columns), None)
-        direction = "DESC" if request.args.get("direction", "asc").lower() == "desc" else "ASC"
-
-        clauses = []
-        params = {}
         try:
-            filters = json.loads(request.args.get("filters", "[]"))
-        except json.JSONDecodeError:
-            return jsonify({"error": {"code": "INVALID_FILTER", "message": "filters must be valid JSON", "correlation_id": request.headers.get("x-correlation-id")}}), 400
-        if not isinstance(filters, list):
-            return jsonify({"error": {"code": "INVALID_FILTER", "message": "filters must be a list", "correlation_id": request.headers.get("x-correlation-id")}}), 400
-        for index, item in enumerate(filters[:20]):
-            if not isinstance(item, dict) or item.get("field") not in columns:
-                continue
-            field = item["field"]
-            operator = item.get("operator", "eq")
-            key = f"filter_{index}"
-            if operator == "contains":
-                clauses.append(f'CAST("{field}" AS TEXT) LIKE :{key}')
-                params[key] = f'%{item.get("value", "")}%'
-            elif operator in {"gte", "lte", "eq"}:
-                sql_operator = {"gte": ">=", "lte": "<=", "eq": "="}[operator]
-                clauses.append(f'"{field}" {sql_operator} :{key}')
-                params[key] = item.get("value")
-
-        where_sql = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-        total = db.session.execute(text(f'SELECT COUNT(*) FROM "{tablename}"{where_sql}'), params).scalar() or 0
-        params.update({"limit": page_size, "offset": (page - 1) * page_size})
-        order_sql = f' ORDER BY "{sort}" {direction}' if sort else ""
-        rows = db.session.execute(text(f'SELECT * FROM "{tablename}"{where_sql}{order_sql} LIMIT :limit OFFSET :offset'), params).fetchall()
-        return jsonify({"data": [dict(row._mapping) for row in rows], "generated_at": datetime.utcnow().isoformat() + "Z", "pagination": {"page": page, "page_size": page_size, "total": total}})
+            return jsonify(table_payload(db.session, tablename, request.args))
+        except (ValueError, json.JSONDecodeError) as error:
+            return jsonify({"error": {"code": "INVALID_FILTER", "message": str(error)}}), 400
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -3753,10 +3663,11 @@ def system_watchlist_data():
         ).strftime("%Y-%m-%dT%H:%M:%S.000Z")
         history_params = {**query_params, "history_start": history_start}
         with snapshot_engine.connect() as conn:
+            history_hint = snapshot_history_index_hint(conn)
             snapshot_rows = conn.execute(
                 text(
                     "SELECT system_name, ticktime, payload_json "
-                    "FROM system_tick_snapshot "
+                    f"FROM system_tick_snapshot{history_hint} "
                     f"WHERE system_name IN ({placeholders}) "
                     "AND ticktime >= :history_start AND is_settled = 1 "
                     "ORDER BY system_name COLLATE NOCASE, ticktime"
@@ -4134,6 +4045,8 @@ def list_unique_factions():
 # Dashboard tenant identity routes are registered after all shared decorators
 # exist. They reject legacy API-key-only requests themselves.
 register_dashboard_user_routes(app, db, require_api_key, commit_with_retry, logger)
+from remote_screen import register_remote_screen_routes
+register_remote_screen_routes(app, db, require_api_key, TENANTS, set_tenant_db_config)
 register_bgs_rule_routes(app, db, require_api_key, commit_with_retry, logger)
 
 
@@ -4205,8 +4118,5 @@ if __name__ == "__main__":
         _bind("0.0.0.0", 5555),
     ]
 
-    # Waitress starten
-    # Quick-Fix: Threads auf 1 setzen, da Database Sessions nicht Multi-Threading-tauglich sind
-    # TODo: Multi-Tenant: Database Sessions Multi-Threading-tauglich machen
-    # 251206 - multi-threading safe sessions implemented, now testing then remove this quick-fix and raise threads again
-    serve(app, sockets=sockets, threads=1)
+    # Sessions are request-local; keep concurrency bounded and one scheduler process.
+    serve(app, sockets=sockets, threads=max(1, min(8, int(os.getenv("VALK_API_THREADS", "4")))))

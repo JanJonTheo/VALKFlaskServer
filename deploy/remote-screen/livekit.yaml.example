@@ -1,0 +1,19 @@
+# LiveKit 1.13.7. Credentials are read from --key-file, never from Git.
+port: 7880
+bind_addresses: ["127.0.0.1"]
+rtc:
+  tcp_port: 7881
+  udp_port: 7882
+  use_external_ip: true
+turn:
+  enabled: true
+  domain: turn.REPLACE.example
+  tls_port: 5349
+  udp_port: 3478
+  external_tls: false
+  proxy_protocol: true
+  proxy_protocol_trusted_cidrs: ["127.0.0.0/8"]
+  cert_file: /etc/valk-remote/turn-fullchain.pem
+  key_file: /etc/valk-remote/turn-privkey.pem
+logging:
+  level: info

@@ -1,0 +1,43 @@
+{
+  "at": 1790626050.570656,
+  "deployment_verified": true,
+  "preserved_new_snapshot": "/var/backups/anke-remote-20260928",
+  "removed": [
+    {
+      "path": "/var/backups/ups_lizenz4_server/pre-rc5-20260928",
+      "files": [
+        {
+          "path": "/var/backups/ups_lizenz4_server/pre-rc5-20260928/SHA256SUMS",
+          "bytes": 131,
+          "sha256": "2997c291934dac96988ecff745b70df039666602a070d2ef1c9b2188b127c693"
+        },
+        {
+          "path": "/var/backups/ups_lizenz4_server/pre-rc5-20260928/database.sql.gz",
+          "bytes": 181781,
+          "sha256": "4b36d61656699d5488cf0ced6f8bba33c958d1c226599ef1918a3cae7260ce49"
+        },
+        {
+          "path": "/var/backups/ups_lizenz4_server/pre-rc5-20260928/approvals-before.json",
+          "bytes": 227,
+          "sha256": "a972ad6cab70d41673321e0083fad0b38a859a8ec4a1907d58b435b6405640c3"
+        }
+      ],
+      "bytes": 182139
+    },
+    {
+      "path": "/root/phpliteadmin-install-backup-20260621-112449",
+      "files": [],
+      "bytes": 0
+    },
+    {
+      "path": "/home/valk/dashboard-v2/shared/housekeeping-backup-20260911",
+      "files": [],
+      "bytes": 0
+    },
+    {
+      "path": "/home/valk/dashboard-v2/shared/api-performance-20260927/backup",
+      "files": [],
+      "bytes": 0
+    }
+  ]
+}

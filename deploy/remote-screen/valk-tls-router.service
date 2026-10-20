@@ -1,0 +1,17 @@
+[Unit]
+Description=VALK HTTPS and TURN TLS routing
+After=network-online.target nginx.service valk-livekit.service
+
+[Service]
+User=haproxy
+Group=haproxy
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+ExecStart=/usr/sbin/haproxy -W -db -f /etc/valk-remote/tls-router.cfg
+Restart=on-failure
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,19 @@
+[Unit]
+Description=VALK ANKe media relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=livekit
+Group=livekit
+ExecStart=/usr/local/bin/livekit-server --config /etc/valk-remote/livekit.yaml --key-file /etc/valk-remote/keys.yaml
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

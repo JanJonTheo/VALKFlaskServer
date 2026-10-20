@@ -1,8 +1,8 @@
 import json
 
-from flask_sqlalchemy import SQLAlchemy
+from tenant_database import TenantSQLAlchemy
 
-db = SQLAlchemy()
+db = TenantSQLAlchemy()
 
 class Event(db.Model):
     __table_args__ = (

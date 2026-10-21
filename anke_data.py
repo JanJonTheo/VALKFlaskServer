@@ -322,7 +322,11 @@ class AnkeData:
             if self.db.execute('SELECT 1 FROM anke_transaction WHERE tenant=? AND owner=? AND fid=? AND receipt IS NULL',key).fetchone():
                 raise RemoteError('Cannot replace an order with unresolved transactions',409)
             rows={r['mission_id']:r for r in json.loads(a['bundle'])['missions']}
-            if any(mid not in rows or not (rows[mid]['terminal'] or rows[mid]['progress'] and rows[mid]['progress']['delivered']==rows[mid]['progress']['total']) for mid in old['selected_ids']):
+            active_markets=lambda value:[(r['SystemName'],r['StationName']) for r in value['markets'] if not r.get('Skip',False)]
+            extension=(order['id']==old['id'] and order['budget']==old['budget']
+                       and active_markets(order)==active_markets(old)
+                       and set(old['selected_ids']) <= set(order['selected_ids']))
+            if not extension and any(mid not in rows or not (rows[mid]['terminal'] or rows[mid]['progress'] and rows[mid]['progress']['delivered']==rows[mid]['progress']['total']) for mid in old['selected_ids']):
                 raise RemoteError('Existing order must be completed before replacing it',409)
         self.db.execute('UPDATE anke_account SET order_json=?,revision=revision+1 WHERE tenant=? AND owner=? AND fid=?', (json.dumps(order),*key))
         self.db.commit()
@@ -337,7 +341,9 @@ class AnkeData:
         receipt=b.get('receipt')
         if not isinstance(receipt,dict):
             raise RemoteError('Portable receipt is required')
-        validate_receipt(old[0],json.loads(old[1]),receipt,fid)
+        # Reconciliation books the proven actual expense, including an overshoot.
+        # Normal purchase authorization and receipt submission stay bounded.
+        validate_receipt(old[0],json.loads(old[1]),receipt,fid,reconcile_purchase=True)
         if old[2]:
             if json.loads(old[2]) != receipt:
                 raise RemoteError('Receipt differs',409)

@@ -9,6 +9,17 @@ from flask import Flask, g, request
 from remote_screen import RemoteStore, RemoteError, register_remote_screen_routes, PREFIX
 
 
+def test_authentication_diagnostics_never_log_keys_and_are_throttled(service,caplog):
+    store=service.client.application.extensions['remote_screen']
+    secret='must-never-appear-in-authentication-logs'
+    for _ in range(2):
+        with pytest.raises(RemoteError):store.authenticate_device('Device '+service.device+'.'+secret)
+    messages=[r.getMessage() for r in caplog.records if 'authentication rejected' in r.getMessage()]
+    assert len(messages)==1
+    assert 'credential-mismatch' in messages[0]
+    assert secret not in messages[0] and service.device not in messages[0]
+
+
 @pytest.fixture
 def service(tmp_path, monkeypatch):
     monkeypatch.setenv('REMOTE_SCREEN_ENABLED', 'true')
@@ -183,3 +194,18 @@ def test_share_search_is_owner_only_and_escapes_sql_wildcards(service):
         connection.execute(text("INSERT INTO users VALUES (1,'friend_one',1),(2,'friendXtwo',1),(3,'friend_off',0)"))
         assert s.call(base + '/share-candidates?q=friend_').json == {'users': [{'id': '1', 'name': 'friend_one'}]}
     engine.dispose()
+
+
+def test_touch_bindings_are_forwarded_and_bounded(service):
+    s = service
+    bindings = {'UI_Up': ['ShiftLeft', 'ArrowUp'], 'FocusLeftPanel': ['Digit1']}
+    assert s.pulse(status={'enabled': True, 'control_enabled': True, 'input_bindings': bindings}).status_code == 200
+    assert s.call('/devices').json['devices'][0]['status']['input_bindings'] == bindings
+    viewer = s.call(f'/devices/{s.device}/viewers', 'POST', json={}).json['viewer_id']
+    assert s.call(f'/devices/{s.device}/viewers/{viewer}', 'POST', json={}).json['status']['input_bindings'] == bindings
+    for invalid in ([], {'UI_Up': ['ArrowUp'] * 6}, {'UI_Up': ['bad code']},
+                    {'Action' + str(i): ['KeyA'] for i in range(65)}):
+        assert s.pulse(status={'enabled': True, 'input_bindings': invalid}).status_code == 400
+        assert s.call('/devices').json['devices'][0]['status']['input_bindings'] == bindings
+    assert s.pulse().status_code == 200
+    assert 'input_bindings' not in s.call('/devices').json['devices'][0]['status']

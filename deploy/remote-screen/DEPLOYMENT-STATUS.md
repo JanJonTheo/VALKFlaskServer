@@ -1,4 +1,39 @@
-# Current production deployment — 20 October 2026
+# Current production deployment — 21 October 2026
+
+The mobile dashboard and compatible input-binding API are deployed.
+
+- Follow-up dashboard release: `20261021-mobile-navigation` adds the direct
+  Operations → Mobile Remote link, including the mobile navigation drawer.
+  Reports and dashboard rollback information are retained in
+  `/home/valk/dashboard-v2/shared/20261021-mobile-navigation`; its previous release
+  is `20261021-mobile-remote-124704`. The three live API modules `remote_screen.py`,
+  `anke_data.py` and `anke_receipts.py` already match the local source checksums.
+  All 30 follow-up public HTTPS checks passed, including the authenticated link.
+
+- Public entry: `https://valk-elite.de/remote`.
+- Dashboard `current` points to `/home/valk/dashboard-v2/releases/20261021-mobile-navigation`.
+- Only `remote_screen.py` was updated in the live backend; unrelated local changes
+  to account data and receipt processing were not deployed. `valkflask` restarted
+  successfully through its existing systemd restart policy.
+- Candidate API tests: 12 passed in Linux. Native dashboard production build passed.
+- 29 public HTTPS checks passed, including mobile authentication/assets, configured
+  input bindings, manual/assist lease switching and synthetic review/start/stop acknowledgements.
+  Temporary probe devices and sessions were removed. No real game input or assist
+  start was sent.
+- The local paired ANKe source installation was started and reports all 28 touch
+  actions, including four panel focus keys and previous/next tabs. The separately
+  paired Shadow-PC now also reports all 28 actions and all six panel/tab bindings
+  in the follow-up verification. Both devices reported idle capture; real game
+  acceptance remains outstanding.
+- Backups and rollback manifests: `/home/valk/dashboard-v2/shared/mobile-remote-20261021-124704`.
+  The previous dashboard release is `20261020-anke-data`; backend code and an online
+  SQLite snapshot were retained. No schema migration was required.
+- Elite was not running on the local Windows machine; start it and restart ANKe
+  before testing live controls from the iPad.
+
+---
+
+# Previous production deployment — 20 October 2026
 
 The account-scoped Wing Trade data API and remote diagnostics are deployed.
 

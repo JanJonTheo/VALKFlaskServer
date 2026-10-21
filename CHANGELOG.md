@@ -1,4 +1,27 @@
+## 21.10.2026 - Mobile remote controls
+
+- Published the deployed companion API source, including device-authentication diagnostics, reviewed Wing order extensions and evidence-based reconciliation of purchase deviations. Existing quantity, budget, ownership and lease checks remain enforced for normal purchases.
+- Release verification: all 161 backend tests and 31 subtests passed, including the real two-client protocol against isolated journals. The test explicitly enables the dormant client sync protocol without changing production defaults.
+
+- Deployed the compatible remote-screen API alongside the mobile dashboard. Linux API tests and 29 public HTTPS checks passed; the local paired ANKe client now publishes all 28 configured touch actions. Previous code and the remote metadata database were backed up for rollback.
+
+- Forward validated Elite key bindings to the tablet remote so touch controls follow each commander's local configuration; older clients remain compatible.
+
 # Changelog
+
+## 20.10.2026 - Diagnose rejected ANKe device authentication
+
+- Authentication failures now distinguish unknown devices, invalid keys and malformed headers using only a device-ID fingerprint. Repeated messages are throttled; credentials and authorization headers are never logged.
+
+## 20.10.2026 - Reconcile proven purchase quantity deviations
+
+- Originating clients can reconcile an already executed purchase whose original journal and exact cargo delta prove a quantity or cost deviation. The ledger records actual expenses once, including spending above the old reservation; further purchases remain subject to the shared total budget. Normal transaction submissions keep the original quantity and cost limits.
+
+## 20.10.2026 - ANKe client sync regression coverage
+
+- Explicitly reviewed Wing starts can add missions to an existing order while retaining its ID and shared credit ledger. Supply order, total budget, pending-transaction guards, exclusive lease and revision checks remain enforced.
+
+- The two-client integration check now verifies that unchanged mission syncs leave the client preview stable, and supports the independent client lease-renewal lock.
 
 
 ## 20.10.2026 - v1.9.0 - Cross-client Wing Trade and remote diagnostics

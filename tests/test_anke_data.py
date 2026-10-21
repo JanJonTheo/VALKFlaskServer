@@ -29,6 +29,27 @@ def setup_wing(s):
     return fence
 
 
+def test_order_extension_preserves_credit_ledger_and_guards(service):
+    s=service;fence=setup_wing(s)
+    intent={'commodity':'gold','quantity':1,'market_id':99,'maximum_cost':600,'started_at':'2026-10-20T10:00:00Z'}
+    assert device(s,'wing/F1/transactions',dict(fence,id='tx1',kind='buy',intent=intent)).status_code==200
+    assert device(s,'wing/F1/transactions',dict(fence,id='tx1',receipt=buy_receipt())).status_code==200
+    current=device(s,'wing/F1/sync',method='GET').json
+    extended=dict(current['order'],selected_ids=[123,124,125])
+    response=device(s,'wing/F1/order',dict(fence,revision=current['revision'],order=extended),method='PUT')
+    assert response.status_code==200
+    assert response.json['spent']==500
+    assert response.json['order']['id']=='order1'
+    revision=response.json['revision']
+    for changes in ({'id':'reset-ledger'}, {'budget':2000}, {'selected_ids':[124,125]}, {'markets':[]}):
+        rejected=device(s,'wing/F1/order',dict(fence,revision=revision,order=dict(extended,**changes)),method='PUT')
+        assert rejected.status_code==409
+    assert device(s,'wing/F1/order',dict(fence,revision=revision-1,order=dict(extended,selected_ids=[123,124,125,126])),method='PUT').status_code==409
+    pending=dict(intent,maximum_cost=400)
+    assert device(s,'wing/F1/transactions',dict(fence,id='tx2',kind='buy',intent=pending)).status_code==200
+    assert device(s,'wing/F1/order',dict(fence,revision=revision,order=dict(extended,selected_ids=[123,124,125,126])),method='PUT').status_code==409
+
+
 def test_resumable_logs_acl_revoke_and_unpair_archive(service):
     s=service
     raw=b'first\nsecond\n'
@@ -149,6 +170,28 @@ def test_original_device_can_reconcile_after_lost_ack_and_restart(service):
     assert device(s,'wing/F1/reconcile',{'id':'tx1','receipt':buy_receipt()}).status_code==200
     assert device(s,'wing/F1/sync',credentials=pc2,method='GET').json['spent']==500
     assert device(s,'wing/F1/lease',{'boot':'bootB'},credentials=pc2).status_code==200
+    assert device(s,'wing/F1/transactions',dict(fence,id='tx2',kind='buy',intent=intent)).status_code==409
+
+
+def test_proven_purchase_variance_is_booked_only_by_origin_reconciliation(service):
+    s=service;fence=setup_wing(s)
+    intent={'commodity':'gold','quantity':1,'market_id':99,'maximum_cost':600,'started_at':'2026-10-20T10:00:00Z'}
+    assert device(s,'wing/F1/transactions',dict(fence,id='tx1',kind='buy',intent=intent)).status_code==200
+    receipt=buy_receipt()
+    receipt.update(quantity=2,cost=1200)
+    receipt['proof']['event'].update(Count=2,TotalCost=1200)
+    receipt['proof']['cargo_after'].update(Count=2,Inventory=[{'Name':'gold','Count':2}])
+    assert device(s,'wing/F1/transactions',dict(fence,id='tx1',receipt=receipt)).status_code==400
+    other=paired(s)
+    assert device(s,'wing/accounts',{'fid':'F1','commander':'Eydis','enabled':True},credentials=other).status_code==200
+    body={'id':'tx1','receipt':receipt}
+    assert device(s,'wing/F1/reconcile',body,credentials=other).status_code==403
+    damaged=json.loads(json.dumps(receipt));damaged['proof']['cargo_after']['Inventory'][0]['Stolen']=1
+    assert device(s,'wing/F1/reconcile',{'id':'tx1','receipt':damaged}).status_code==400
+    assert device(s,'wing/F1/reconcile',body).status_code==200
+    assert device(s,'wing/F1/reconcile',body).status_code==200
+    synced=device(s,'wing/F1/sync',method='GET').json
+    assert synced['spent']==1200 and synced['pending']==[]
     assert device(s,'wing/F1/transactions',dict(fence,id='tx2',kind='buy',intent=intent)).status_code==409
 
 

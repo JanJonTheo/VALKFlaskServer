@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
+import re
 import secrets
 import sqlite3
 import threading
@@ -48,6 +50,7 @@ class RemoteStore:
         self.lock = threading.RLock()
         self.clock, self.validate = clock, validate_identity
         self.pairs, self.runtime = {}, {}
+        self.auth_failures = {}
 
     def audit(self, device, actor, action):
         self.db.execute('INSERT INTO remote_audit VALUES (?,?,?,?,?)',
@@ -131,6 +134,9 @@ class RemoteStore:
         return {'device_id': device_id, 'secret': secret}
 
     def authenticate_device(self, authorization):
+        device_id=''
+        d=None
+        secret=''
         try:
             scheme, credentials = authorization.split(' ', 1)
             device_id, secret = credentials.split('.', 1)
@@ -140,7 +146,16 @@ class RemoteStore:
             if not secrets.compare_digest(d['secret_hash'], digest(secret)):
                 raise ValueError()
             return d
-        except (ValueError, RemoteError):
+        except (ValueError, RemoteError) as exc:
+            reason=('unknown-device' if isinstance(exc,RemoteError) and exc.status==404
+                    else 'credential-mismatch' if d is not None else 'malformed-authorization')
+            fingerprint=digest(device_id)[:12] if device_id else 'missing'
+            key=(fingerprint,reason);now=self.clock()
+            previous=self.auth_failures.get(key)
+            if previous is None or now-previous>=30:
+                if len(self.auth_failures)>=256:self.auth_failures.clear()
+                self.auth_failures[key]=now
+                logging.getLogger(__name__).warning('ANKe device authentication rejected: reason=%s device=%s credential_length=%s',reason,fingerprint,len(secret))
             raise RemoteError('Device authentication required', 401) from None
 
     def public(self, d, identity):
@@ -197,8 +212,22 @@ class RemoteStore:
         status = body.get('status', {})
         if not isinstance(status, dict):
             raise RemoteError('Invalid status')
-        s['status'] = {k: status.get(k) for k in ('commander', 'fid', 'assist', 'capture', 'frame_at', 'manual_ready')}
-        s['status'].update(enabled=status.get('enabled') is True, control_enabled=status.get('control_enabled') is True)
+        next_status = {k: status.get(k) for k in ('commander', 'fid', 'assist', 'capture', 'frame_at', 'manual_ready')}
+        next_status.update(enabled=status.get('enabled') is True, control_enabled=status.get('control_enabled') is True)
+        # Optional capability: older clients remain viewable without guessed bindings.
+        if 'input_bindings' in status:
+            bindings = status['input_bindings']
+            if not isinstance(bindings, dict) or len(bindings) > 64:
+                raise RemoteError('Invalid remote input bindings')
+            safe = {}
+            for action, chord in bindings.items():
+                if (not isinstance(action, str) or not re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{0,63}', action)
+                        or not isinstance(chord, list) or not 1 <= len(chord) <= 5
+                        or any(not isinstance(code, str) or not re.fullmatch(r'[A-Za-z][A-Za-z0-9]{0,31}', code) for code in chord)):
+                    raise RemoteError('Invalid remote input binding')
+                safe[action] = chord
+            next_status['input_bindings'] = safe
+        s['status'] = next_status
         if not s['status']['enabled']:
             s['viewers'].clear()
             self.rotate(s)

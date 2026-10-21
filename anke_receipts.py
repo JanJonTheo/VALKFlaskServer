@@ -21,7 +21,7 @@ def cargo_vector(cargo):
     return result,total
 
 
-def validate_receipt(kind,intent,receipt,fid):
+def validate_receipt(kind,intent,receipt,fid,*,reconcile_purchase=False):
     proof=receipt.get('proof')
     if not isinstance(proof,dict) or proof.get('fid') != fid:
         raise RemoteError('Account-bound portable proof is required')
@@ -30,7 +30,8 @@ def validate_receipt(kind,intent,receipt,fid):
         raise RemoteError('Original journal receipt required')
     quantity=receipt.get('quantity')
     commodity=intent.get('commodity'); market=intent.get('market_id')
-    if (type(quantity) is not int or quantity<=0 or type(intent.get('quantity')) is not int or quantity>intent['quantity']
+    variance=kind=='buy' and reconcile_purchase
+    if (type(quantity) is not int or quantity<=0 or type(intent.get('quantity')) is not int or (quantity>intent['quantity'] and not variance)
             or receipt.get('commodity') != commodity or receipt.get('market_id') != market
             or receipt.get('timestamp') != event.get('timestamp') or date(receipt.get('timestamp')) is None):
         raise RemoteError('Receipt identity differs from prepared intent')
@@ -52,7 +53,8 @@ def validate_receipt(kind,intent,receipt,fid):
         if (event.get('event')!='MarketBuy' or event.get('MarketID')!=market
                 or str(event.get('Type','')).lower().strip('$;').removesuffix('_name')!=commodity
                 or event.get('Count')!=quantity or event.get('TotalCost')!=receipt.get('cost')
-                or type(receipt.get('cost')) is not int or not 0<=receipt['cost']<=intent['maximum_cost']):
+                or type(receipt.get('cost')) is not int or receipt['cost']<0
+                or (receipt['cost']>intent['maximum_cost'] and not variance)):
             raise RemoteError('MarketBuy proof differs from prepared purchase')
     elif (event.get('event')!='CargoDepot' or str(event.get('UpdateType','')).lower()!='deliver'
           or event.get('MissionID')!=intent.get('mission_id') or event.get('EndMarketID')!=market

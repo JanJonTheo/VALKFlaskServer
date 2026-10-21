@@ -17,6 +17,9 @@ def test_mission_restore_order_handoff_and_shared_credit_ceiling(service,tmp_pat
     if not (client_source/'EDRemoteData.py').is_file():
         pytest.skip('Set ANKE_CLIENT_SOURCE to the ANKe checkout for the two-client integration test')
     monkeypatch.syspath_prepend(str(client_source))
+    # Exercise the dormant sync protocol without enabling it in normal clients.
+    import EDWingRemoteRecovery
+    monkeypatch.setattr(EDWingRemoteRecovery, 'WING_SYNC_AVAILABLE', True)
     from EDRemoteData import RemoteData
     from EDWingMissionTracker import WingMissionTracker
     s=service
@@ -42,6 +45,7 @@ def test_mission_restore_order_handoff_and_shared_credit_ceiling(service,tmp_pat
         value.ap=SimpleNamespace(jn=SimpleNamespace(current_log=str(journals(pc,accepted))),
                                  config={'WingRemoteAccounts':['F1']},wing_trade_assist=SimpleNamespace(active=False))
         value.wing_root=tmp_path/pc/'wing-trade';value.lock=threading.RLock()
+        value.lease_lock=threading.RLock()
         value.lease=None;value.pending=None;value.last_sync=0;value.spent=0
         def connection(path,body=None,method=None):
             result=device(s,path.removeprefix('device/'),body,credentials,method or ('POST' if body is not None else 'GET'))
@@ -54,6 +58,10 @@ def test_mission_restore_order_handoff_and_shared_credit_ceiling(service,tmp_pat
     a=client('pcA',s.credentials,True)
     b=client('pcB',paired(s),False)
     assert len(a.sync(account)['bundle']['missions'])==1
+    metadata=a.wing_root/'accounts'/'F1'/'remote-order.json'
+    first_sync=metadata.read_bytes(),metadata.stat().st_mtime_ns
+    a.sync(account)
+    assert (metadata.read_bytes(),metadata.stat().st_mtime_ns)==first_sync
     b.sync(account)
     tracker=WingMissionTracker(sync_root=b.wing_root)
     [restored]=tracker.refresh_directory(Path(b.ap.jn.current_log).parent,commander_fid='F1')

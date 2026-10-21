@@ -71,6 +71,29 @@ def test_resumable_logs_acl_revoke_and_unpair_archive(service):
     assert device(s,'diagnostics/logs',chunk).status_code==401
 
 
+def test_retention_ranks_large_histories_once_and_keeps_per_device_limits(service):
+    import time
+    database = service.store.db
+    now = time.time()
+    database.executemany('INSERT INTO anke_event(device,id,at,payload) VALUES (?,?,?,?)',
+        [('large-history', str(i), now, '{}') for i in range(11010)] +
+        [('expired-history', str(i), now - 31 * 86400, '{}') for i in range(30)])
+    database.commit()
+    operations = [0]
+    def bounded_work():
+        operations[0] += 1000
+        return operations[0] > 2_000_000
+    database.set_progress_handler(bounded_work, 1000)
+    try:
+        service.client.application.extensions['anke_data'].prune()
+    finally:
+        database.set_progress_handler(None, 0)
+    assert database.execute("SELECT count(*) FROM anke_event WHERE device='large-history'").fetchone()[0] == 10000
+    assert database.execute("SELECT count(*) FROM anke_event WHERE device='expired-history'").fetchone()[0] == 25
+    assert database.execute("SELECT id FROM anke_event WHERE device='large-history' ORDER BY sequence LIMIT 1").fetchone()[0] == '1010'
+    assert database.execute("SELECT id FROM anke_event WHERE device='expired-history' ORDER BY sequence LIMIT 1").fetchone()[0] == '5'
+
+
 def test_exactly_25_events_survive_retention_and_deduplicate(service):
     s=service
     events=[{'id':f'e{i}','message':f'message {i}','compact':f'msg {i}','icon':'📦','locations':[['Sys','Sol']]} for i in range(30)]

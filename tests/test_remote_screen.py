@@ -1,4 +1,6 @@
 import json
+import io
+import threading
 from functools import wraps
 from types import SimpleNamespace
 
@@ -7,6 +9,49 @@ import pytest
 from flask import Flask, g, request
 
 from remote_screen import RemoteStore, RemoteError, register_remote_screen_routes, PREFIX
+
+
+def test_slow_upload_does_not_block_device_heartbeat(service):
+    reading, finish = threading.Event(), threading.Event()
+    responses = []
+
+    class SlowBody(io.BytesIO):
+        def readinto(self, buffer):
+            reading.set()
+            if not finish.wait(5):
+                raise TimeoutError('Test body was not released')
+            return super().readinto(buffer)
+
+    def upload():
+        with service.client.application.test_client() as client:
+            responses.append(client.open(PREFIX + '/device/diagnostics/events', method='POST',
+                environ_overrides={'wsgi.input': SlowBody(b'{}'), 'CONTENT_LENGTH': '2',
+                                   'CONTENT_TYPE': 'application/json'},
+                headers={'Authorization': 'Device ' + service.device + '.' + service.credentials['secret']}))
+
+    worker = threading.Thread(target=upload)
+    worker.start()
+    try:
+        assert reading.wait(2)
+        # Use a bounded lock probe so a regression cannot deadlock this test.
+        available = service.store.lock.acquire(timeout=.5)
+        assert available, 'Slow request body held the shared heartbeat lock'
+        service.store.lock.release()
+        assert service.pulse().status_code == 200
+        assert not finish.is_set()
+    finally:
+        finish.set()
+        worker.join(5)
+    assert not worker.is_alive()
+    assert len(responses) == 1
+    assert responses[0].status_code == 200
+
+
+def test_remote_body_global_limit_does_not_replace_stricter_route_limit(service):
+    assert service.call('/pairings', 'POST', data='x' * (9 * 1024 * 1024 + 1),
+                        content_type='application/json').status_code == 413
+    assert service.call('/pair', 'POST', data='{}' + ' ' * 65536,
+                        content_type='application/json').status_code == 413
 
 
 def test_authentication_diagnostics_never_log_keys_and_are_throttled(service,caplog):

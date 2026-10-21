@@ -1,4 +1,28 @@
-# Current production deployment — 21 October 2026
+# Current production fix — 21 October 2026
+
+- Dashboard: `/home/valk/dashboard-v2/releases/20261021-remote-reconnect`.
+- API: `remote_screen.py` reads bounded upload bodies before acquiring the session
+  lock; `anke_data.py` ranks events once for retention instead of correlated rescans.
+  On 2,103 production events the read-only candidate query improved from 761 ms to
+  3 ms. Retention and access rules are unchanged.
+- Short media interruptions pause input and preserve the existing manual lease for
+  up to eight seconds. Held input is neutralized and never replayed. Revoked leases
+  are not reacquired, and real safety stops remain effective.
+- Passed 164 backend tests, 31 subtests, 27 Linux companion tests, the final dashboard
+  production build, 22 viewer regression tests, 15 browser checks and 30 public HTTPS
+  checks. Public control/API calls sampled after activation took roughly 35–123 ms;
+  intermittent 1–2 second lock stalls were observed before the retention fix.
+- Shadow-PC reported live capture and all 28 touch actions. Verification used a
+  separate synthetic device for start/review/stop and cleaned up its records and
+  temporary session; no real game input or assist start was sent.
+- Artifacts: `/home/valk/dashboard-v2/shared/20261021-remote-reconnect`. Roll back both
+  API files from `backend-before`, restart `valkflask`, and restore dashboard release
+  `20261021-mobile-navigation`. Do not replace the live metadata database with the
+  backup over newer activity.
+
+---
+
+# Previous production deployment — 21 October 2026
 
 The mobile dashboard and compatible input-binding API are deployed.
 

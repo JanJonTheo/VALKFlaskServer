@@ -1,3 +1,10 @@
+## 21.10.2026 - Keep remote heartbeats responsive during uploads
+
+- Read bounded request bodies before taking the shared remote-session lock so slow diagnostic or mission uploads cannot block device/viewer heartbeats and trigger reconnects. The 9 MiB global ceiling and stricter per-route limits remain enforced.
+- Added a concurrent slow-upload regression check that verifies a device heartbeat completes while the upload is still waiting for its body, plus request-size boundary checks.
+- Archive retention now ranks each device's events once instead of repeatedly scanning its history under the heartbeat lock. In a read-only production snapshot with 2,103 events, the candidate-selection query dropped from 761 ms to 3 ms. Existing 30-day retention, newest-25 preservation and the 10,000-event limit remain unchanged; a bounded-work regression test covers larger histories.
+- Deployed both fixes alongside dashboard release `20261021-remote-reconnect`. All 164 backend tests, 31 subtests, 27 Linux companion tests and 30 public HTTPS checks passed. Sampled public control/API calls completed in roughly 35–123 ms after activation; temporary test devices and sessions were removed.
+
 ## 21.10.2026 - Mobile remote controls
 
 - Published the deployed companion API source, including device-authentication diagnostics, reviewed Wing order extensions and evidence-based reconciliation of purchase deviations. Existing quantity, budget, ownership and lease checks remain enforced for normal purchases.

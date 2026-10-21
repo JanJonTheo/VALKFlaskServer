@@ -293,6 +293,12 @@ def register_remote_screen_routes(app, db, require_api_key, tenants, bind_tenant
             def wrapped(**kwargs):
                 try:
                     enabled()
+                    # Slow log/mission uploads must not hold the runtime lock:
+                    # device/viewer heartbeats have independent short deadlines.
+                    # Individual handlers retain their stricter JSON/body limits.
+                    if request.method in ('POST', 'PUT'):
+                        request.max_content_length = 9 * 1024 * 1024
+                        request.get_data(cache=True)
                     with store.lock:
                         if authenticated:
                             identity = getattr(g, 'dashboard_identity', None)

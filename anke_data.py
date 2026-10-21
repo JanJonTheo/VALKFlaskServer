@@ -82,13 +82,14 @@ class AnkeData:
         cutoff = time.time() - RETENTION
         self.db.execute('DELETE FROM anke_log WHERE updated<?', (cutoff,))
         self.db.execute('DELETE FROM anke_log_chunk WHERE NOT EXISTS (SELECT 1 FROM anke_log WHERE anke_log.device=anke_log_chunk.device AND anke_log.stream=anke_log_chunk.stream)')
-        # Last 25 events survive the archive TTL; historic events do not.
-        self.db.execute('DELETE FROM anke_event WHERE at<? AND sequence NOT IN '
-                        '(SELECT sequence FROM anke_event e WHERE e.device=anke_event.device '
-                        'ORDER BY sequence DESC LIMIT 25)', (cutoff,))
-        self.db.execute('DELETE FROM anke_event WHERE sequence NOT IN '
-                        '(SELECT sequence FROM anke_event e WHERE e.device=anke_event.device '
-                        'ORDER BY sequence DESC LIMIT 10000)')
+        # Rank once per device, rather than rescanning its entire history for
+        # every event while holding the shared, time-critical heartbeat lock.
+        # The newest 25 survive TTL; at most 10,000 survive per device overall.
+        self.db.execute('DELETE FROM anke_event WHERE sequence IN ('
+                        'SELECT sequence FROM ('
+                        'SELECT sequence,at,ROW_NUMBER() OVER ('
+                        'PARTITION BY device ORDER BY sequence DESC) AS position FROM anke_event'
+                        ') WHERE position>10000 OR (position>25 AND at<?))', (cutoff,))
         self.db.commit()
 
     def upload(self, d, b):
